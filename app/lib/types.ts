@@ -20,3 +20,10 @@ export interface TranscribeOptions {
   language: string
   prompt: string
 }
+
+export interface ChunkResult {
+  index: number
+  text: string
+  duration: number
+  status: 'done' | 'retrying'
+}

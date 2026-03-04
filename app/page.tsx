@@ -78,10 +78,12 @@ export default function Home() {
   const [isDragOver, setIsDragOver] = useState(false)
   const [copied, setCopied] = useState(false)
   const [showApiKey, setShowApiKey] = useState(false)
+  const [showChunks, setShowChunks] = useState(false)
+  const [retryingIndex, setRetryingIndex] = useState<number | null>(null)
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const submitIdRef = useRef(0)
-  const { processAndTranscribe, status, cancel } = useAudioProcessor()
+  const { processAndTranscribe, status, cancel, chunkResults, retryChunk } = useAudioProcessor()
 
   useEffect(() => {
     const saved = localStorage.getItem('mojiokoshi_api_key')
@@ -184,6 +186,24 @@ export default function Home() {
     submitIdRef.current++
     cancel()
     setIsLoading(false)
+  }
+
+  const handleRetryChunk = async (index: number) => {
+    if (retryingIndex !== null) return
+
+    setError(null)
+    setRetryingIndex(index)
+    try {
+      const merged = await retryChunk(index)
+      setResult(merged)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'リトライに失敗しました'
+      if (msg !== 'キャンセルされました') {
+        setError(msg)
+      }
+    } finally {
+      setRetryingIndex(null)
+    }
   }
 
   const copyToClipboard = async () => {
@@ -366,7 +386,7 @@ export default function Home() {
           {/* Submit */}
           <button
             onClick={isLoading ? handleCancel : handleSubmit}
-            disabled={!isLoading && (!file || !apiKey)}
+            disabled={retryingIndex !== null || (!isLoading && (!file || !apiKey))}
             className={`btn-primary w-full font-medium py-3.5 rounded-lg text-sm tracking-wide transition-all ${
               isLoading
                 ? 'bg-red-500/80 hover:bg-red-500 text-white'
@@ -451,6 +471,64 @@ export default function Home() {
                   {result}
                 </pre>
               </div>
+
+              {/* Chunk Details */}
+              {chunkResults.length > 1 && (
+                <div className="mt-4">
+                  <button
+                    onClick={() => setShowChunks(!showChunks)}
+                    className="flex items-center gap-2 text-xs text-text-tertiary hover:text-text-secondary transition-colors"
+                  >
+                    <svg
+                      className={`w-3 h-3 transition-transform ${showChunks ? '' : '-rotate-90'}`}
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                    <span className="font-mono tracking-wide">
+                      チャンク詳細 ({chunkResults.length})
+                    </span>
+                  </button>
+
+                  {showChunks && (
+                    <div className="mt-3 bg-surface-card border border-border rounded-xl divide-y divide-border overflow-hidden">
+                      {chunkResults.map((chunk) => (
+                        <div key={chunk.index} className="p-4">
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="text-xs text-text-secondary font-mono">
+                              チャンク {chunk.index + 1} / {chunkResults.length}
+                            </span>
+                            {chunk.status === 'retrying' || retryingIndex === chunk.index ? (
+                              <span className="flex items-center gap-1.5 text-xs text-accent font-mono">
+                                <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                                </svg>
+                                retrying…
+                              </span>
+                            ) : (
+                              <button
+                                onClick={() => handleRetryChunk(chunk.index)}
+                                disabled={retryingIndex !== null}
+                                className="text-xs text-text-tertiary hover:text-accent transition-colors font-mono disabled:opacity-30 disabled:cursor-not-allowed"
+                              >
+                                retry
+                              </button>
+                            )}
+                          </div>
+                          <div className="max-h-40 overflow-y-auto">
+                            <pre className="font-mono text-xs text-text-primary/70 whitespace-pre-wrap leading-relaxed break-words">
+                              {chunk.text}
+                            </pre>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>

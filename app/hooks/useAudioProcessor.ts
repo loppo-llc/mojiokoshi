@@ -3,7 +3,7 @@
 import { useState, useRef, useCallback } from 'react'
 import { FFmpeg } from '@ffmpeg/ffmpeg'
 import { toBlobURL, fetchFile } from '@ffmpeg/util'
-import type { ProcessingStatus, TranscribeOptions } from '../lib/types'
+import type { ProcessingStatus, TranscribeOptions, ChunkResult } from '../lib/types'
 import { mergeResults } from '../lib/subtitle-merger'
 
 const MAX_DIRECT_SIZE = 25 * 1024 * 1024 // 25MB
@@ -100,10 +100,30 @@ export function useAudioProcessor() {
     detail: '',
     progress: 0,
   })
+  const [chunkResults, setChunkResults] = useState<ChunkResult[]>([])
+  const chunkResultsRef = useRef<ChunkResult[]>([])
 
   const ffmpegRef = useRef<FFmpeg | null>(null)
   const jobIdRef = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
+  const chunkBlobsRef = useRef<File[]>([])
+  const initialPromptRef = useRef('')
+  const jobOptionsRef = useRef<TranscribeOptions | null>(null)
+
+  const updateChunkResults = useCallback((updater: (prev: ChunkResult[]) => ChunkResult[]) => {
+    setChunkResults((prev) => {
+      const next = updater(prev)
+      chunkResultsRef.current = next
+      return next
+    })
+  }, [])
+
+  const clearChunks = useCallback(() => {
+    chunkBlobsRef.current = []
+    chunkResultsRef.current = []
+    jobOptionsRef.current = null
+    setChunkResults([])
+  }, [])
 
   const loadFFmpeg = useCallback(async () => {
     if (ffmpegRef.current) return ffmpegRef.current
@@ -147,12 +167,76 @@ export function useAudioProcessor() {
     return SEGMENT_SECONDS // fallback
   }, [])
 
+  const retryChunk = useCallback(
+    async (index: number): Promise<string> => {
+      const opts = jobOptionsRef.current
+      if (!opts) throw new Error('実行オプションが見つかりません')
+
+      const chunkFile = chunkBlobsRef.current[index]
+      if (!chunkFile) throw new Error('チャンクデータが見つかりません')
+
+      const retryJobId = jobIdRef.current
+      const abortController = new AbortController()
+      abortRef.current = abortController
+
+      // Mark as retrying
+      updateChunkResults((prev) =>
+        prev.map((c) => (c.index === index ? { ...c, status: 'retrying' as const } : c)),
+      )
+
+      try {
+        // Build prompt from previous chunk
+        let prompt = initialPromptRef.current
+        const currentResults = chunkResultsRef.current
+        if (index > 0 && currentResults[index - 1]) {
+          prompt = extractLastChars(currentResults[index - 1].text, opts.responseFormat, 200)
+        }
+
+        const result = await transcribeChunk(chunkFile, chunkFile.name, {
+          ...opts,
+          prompt,
+        }, abortController.signal)
+
+        // Check if job changed during retry
+        if (jobIdRef.current !== retryJobId) throw new Error('キャンセルされました')
+
+        // Update chunk result
+        updateChunkResults((prev) =>
+          prev.map((c) =>
+            c.index === index ? { ...c, text: result, status: 'done' as const } : c,
+          ),
+        )
+
+        // Re-merge all results
+        const updatedResults = chunkResultsRef.current.map((c) =>
+          c.index === index ? { ...c, text: result } : c,
+        )
+        const texts = updatedResults.map((c) => c.text)
+        const durations = updatedResults.map((c) => c.duration)
+        return mergeResults(texts, durations, opts.responseFormat)
+      } catch (err) {
+        // Revert status to done on failure (only if same job)
+        if (jobIdRef.current === retryJobId) {
+          updateChunkResults((prev) =>
+            prev.map((c) => (c.index === index ? { ...c, status: 'done' as const } : c)),
+          )
+        }
+        throw err
+      }
+    },
+    [updateChunkResults],
+  )
+
   const processAndTranscribe = useCallback(
     async (file: File, options: TranscribeOptions): Promise<string> => {
       // Increment job ID to invalidate any previous job
       const currentJobId = ++jobIdRef.current
       const abortController = new AbortController()
       abortRef.current = abortController
+
+      clearChunks()
+      initialPromptRef.current = options.prompt || ''
+      jobOptionsRef.current = options
 
       const isCancelled = () => jobIdRef.current !== currentJobId || abortController.signal.aborted
 
@@ -364,13 +448,23 @@ export function useAudioProcessor() {
           throw new Error('音声の分割に失敗しました')
         }
 
-        // Get durations for each chunk
+        // Get durations for each chunk and save chunk File objects
         const chunkDurations: number[] = []
-        for (const name of chunkFiles) {
-          const dur = await getFileDuration(ffmpeg, name)
+        for (let i = 0; i < chunkFiles.length; i++) {
+          const dur = await getFileDuration(ffmpeg, chunkFiles[i])
           chunkDurations.push(dur)
-        }
 
+          // Save chunk as File for retry
+          const chunkRaw = await ffmpeg.readFile(chunkFiles[i]) as Uint8Array
+          const chunkData = new Uint8Array(chunkRaw)
+          const chunkFilename = chunkFiles[i]
+          const chunkFile = new File(
+            [new Blob([chunkData], { type: chunkMime })],
+            chunkFilename,
+            { type: chunkMime },
+          )
+          chunkBlobsRef.current[i] = chunkFile
+        }
         // Transcribe each chunk
         setStatus({
           step: 'transcribing',
@@ -390,38 +484,36 @@ export function useAudioProcessor() {
             progress: Math.round(((i) / chunkFiles.length) * 100),
           })
 
-          const chunkRaw = await ffmpeg.readFile(chunkFiles[i]) as Uint8Array
-          const chunkData = new Uint8Array(chunkRaw)
+          const chunkFile = chunkBlobsRef.current[i]
 
-          let chunkBlob: Blob
-          let chunkFilename: string
+          let chunkBlob: Blob = chunkFile
+          let chunkFilename = chunkFile.name
 
-          if (chunkData.length > MAX_DIRECT_SIZE) {
+          if (chunkFile.size > MAX_DIRECT_SIZE) {
             // Rare: chunk exceeds 25MB (high-bitrate compressed audio)
             const tmpIn = `${prefix}oversize_in${chunkExt}`
             const tmpOut = `${prefix}oversize_out.mp3`
             trackedFiles.push(tmpIn, tmpOut)
             try {
-              await ffmpeg.writeFile(tmpIn, chunkData)
+              await ffmpeg.writeFile(tmpIn, await fetchFile(chunkFile))
               await ffmpeg.exec(['-i', tmpIn, '-b:a', '128k', '-ac', '1', '-y', tmpOut])
               const recompressed = await ffmpeg.readFile(tmpOut) as Uint8Array
               chunkBlob = new Blob([new Uint8Array(recompressed)], { type: 'audio/mpeg' })
               chunkFilename = `chunk_${i}.mp3`
+              // Update stored blob for retry
+              chunkBlobsRef.current[i] = new File([chunkBlob], chunkFilename, { type: 'audio/mpeg' })
             } finally {
               try { await ffmpeg.deleteFile(tmpIn) } catch { /* ignore */ }
               try { await ffmpeg.deleteFile(tmpOut) } catch { /* ignore */ }
             }
-          } else {
-            chunkBlob = new Blob([chunkData], { type: chunkMime })
-            chunkFilename = chunkFiles[i]
           }
 
-          const chunkFile = new File([chunkBlob], chunkFilename, { type: chunkBlob.type })
+          const fileToSend = new File([chunkBlob], chunkFilename, { type: chunkBlob.type })
 
           let result: string | null = null
           for (let retry = 0; retry <= MAX_RETRIES; retry++) {
             try {
-              result = await transcribeChunk(chunkFile, chunkFilename, {
+              result = await transcribeChunk(fileToSend, chunkFilename, {
                 ...options,
                 prompt: prevText,
               }, abortController.signal)
@@ -435,6 +527,17 @@ export function useAudioProcessor() {
 
           results.push(result!)
           prevText = extractLastChars(result!, options.responseFormat, 200)
+
+          // Save chunk result
+          updateChunkResults((prev) => [
+            ...prev,
+            {
+              index: i,
+              text: result!,
+              duration: chunkDurations[i],
+              status: 'done' as const,
+            },
+          ])
         }
 
         // Merge results
@@ -457,17 +560,18 @@ export function useAudioProcessor() {
         throw err
       }
     },
-    [loadFFmpeg, getFileDuration],
+    [loadFFmpeg, getFileDuration, clearChunks, updateChunkResults],
   )
 
   const cancel = useCallback(() => {
     jobIdRef.current++
     abortRef.current?.abort()
     abortRef.current = null
+    clearChunks()
     setStatus({ step: 'idle', detail: '', progress: 0 })
-  }, [])
+  }, [clearChunks])
 
-  return { processAndTranscribe, status, cancel }
+  return { processAndTranscribe, status, cancel, chunkResults, retryChunk }
 }
 
 function getExtension(filename: string): string {
