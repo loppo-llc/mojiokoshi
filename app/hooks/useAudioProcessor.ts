@@ -30,8 +30,15 @@ async function transcribeChunk(
     signal,
   })
 
-  const data = await res.json()
-  if (!res.ok) throw new Error(data.error || `API error: ${res.status}`)
+  const text = await res.text()
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let data: any
+  try {
+    data = JSON.parse(text)
+  } catch {
+    throw new Error(res.ok ? '予期しないレスポンス形式です' : `API error: ${res.status}`)
+  }
+  if (!res.ok) throw new Error((data.error as string) || `API error: ${res.status}`)
 
   if (options.responseFormat === 'json' || options.responseFormat === 'verbose_json') {
     return JSON.stringify(data, null, 2)
