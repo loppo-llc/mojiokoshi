@@ -456,10 +456,15 @@ export default function Home() {
         </div>
 
         {/* Footer */}
-        <footer className="mt-16 text-center">
+        <footer className="mt-16 text-center space-y-1">
           <p className="text-text-tertiary text-[11px] font-mono tracking-wide">
             Powered by OpenAI Speech-to-Text API
           </p>
+          {process.env.NEXT_PUBLIC_COMMIT_HASH && (
+            <p className="text-text-tertiary/50 text-[10px] font-mono">
+              {process.env.NEXT_PUBLIC_COMMIT_HASH}
+            </p>
+          )}
         </footer>
       </main>
     </>
