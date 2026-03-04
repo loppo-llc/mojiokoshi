@@ -5,7 +5,6 @@ import { FFmpeg } from '@ffmpeg/ffmpeg'
 import { toBlobURL, fetchFile } from '@ffmpeg/util'
 import type { ProcessingStatus, TranscribeOptions } from '../lib/types'
 import { mergeResults } from '../lib/subtitle-merger'
-import { transcribeAudio } from '../actions/transcribe'
 
 const MAX_DIRECT_SIZE = 25 * 1024 * 1024 // 25MB
 const SEGMENT_SECONDS = 600 // 10 minutes
@@ -41,25 +40,37 @@ async function transcribeChunk(
   options: TranscribeOptions,
   signal?: AbortSignal,
 ): Promise<string> {
-  if (signal?.aborted) throw new Error('キャンセルされました')
-
   const formData = new FormData()
   formData.append('file', file, filename)
-  formData.append('apiKey', options.apiKey)
   formData.append('model', options.model)
   formData.append('response_format', options.responseFormat)
   if (options.language) formData.append('language', options.language)
   if (options.prompt) formData.append('prompt', options.prompt)
 
-  const data = await transcribeAudio(formData)
+  const res = await fetch('/api/openai/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${options.apiKey}`,
+    },
+    body: formData,
+    signal,
+  })
 
-  if (signal?.aborted) throw new Error('キャンセルされました')
-  if (data.error) throw new Error(data.error)
+  if (!res.ok) {
+    let msg = `API error: ${res.status}`
+    try {
+      const body = await res.text()
+      const err = JSON.parse(body)
+      if (err.error?.message) msg = err.error.message
+    } catch { /* use default msg */ }
+    throw new Error(msg)
+  }
 
   if (options.responseFormat === 'json' || options.responseFormat === 'verbose_json') {
+    const data = await res.json()
     return JSON.stringify(data, null, 2)
   }
-  return data.text || JSON.stringify(data, null, 2)
+  return await res.text()
 }
 
 function extractLastChars(text: string, format: string, count: number): string {

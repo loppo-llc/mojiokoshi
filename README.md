@@ -27,7 +27,7 @@ Upload an audio file, provide your OpenAI API key, and get a transcription back 
 - SRT/VTT timestamp offsetting for correct timing across chunks
 - Language detection (auto or manual selection from 11 languages)
 - Optional prompt for domain-specific vocabulary hints
-- API key stored locally in browser (never sent to any server other than OpenAI)
+- API key stored locally in browser (sent only to OpenAI via server-side proxy)
 - One-click copy of transcription results
 
 ## Tech Stack
