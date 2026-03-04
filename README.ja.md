@@ -17,9 +17,14 @@
 
 ## 機能
 
-- ドラッグ＆ドロップまたはクリックでオーディオファイルをアップロード（mp3, wav, m4a, mp4, webm — 最大 25MB）
+- ドラッグ＆ドロップまたはクリックでオーディオファイルをアップロード（mp3, wav, m4a, mp4, webm, ogg, flac — 最大 500MB）
+- 大容量ファイル対応: 25MB 超のファイルは [ffmpeg.wasm](https://ffmpegwasm.netlify.app/) でブラウザ内圧縮・分割（サーバー不要）
+- チャンク間の文脈引き継ぎによる高精度な分割文字起こし
+- 圧縮・分割・文字起こし中のリアルタイム進捗表示
+- 処理中いつでもキャンセル可能
 - モデル選択: GPT-4o Transcribe / GPT-4o Mini Transcribe / Whisper-1
 - 出力形式: text / json / verbose_json / srt / vtt
+- SRT/VTT 形式ではチャンク間のタイムスタンプを自動オフセット
 - 言語検出（自動または 11 言語から手動選択）
 - プロンプト入力で固有名詞・専門用語のヒントを指定可能
 - API キーはブラウザの localStorage に保存（OpenAI 以外のサーバーには送信されません）
@@ -30,6 +35,7 @@
 - [Next.js 15](https://nextjs.org/)（App Router）
 - [React 19](https://react.dev/)
 - [Tailwind CSS 3](https://tailwindcss.com/)
+- [ffmpeg.wasm](https://ffmpegwasm.netlify.app/)（クライアントサイド音声処理）
 - TypeScript
 
 ## セットアップ

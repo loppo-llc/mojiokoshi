@@ -17,9 +17,14 @@ Upload an audio file, provide your OpenAI API key, and get a transcription back 
 
 ## Features
 
-- Drag & drop or click-to-upload audio files (mp3, wav, m4a, mp4, webm — up to 25MB)
+- Drag & drop or click-to-upload audio files (mp3, wav, m4a, mp4, webm, ogg, flac — up to 500MB)
+- Large file support: files over 25MB are automatically compressed and split using [ffmpeg.wasm](https://ffmpegwasm.netlify.app/) (runs entirely in the browser)
+- Chunked transcription with context carryover for accurate results across splits
+- Real-time progress display during compression, splitting, and transcription
+- Cancellable processing at any stage
 - Model selection: GPT-4o Transcribe, GPT-4o Mini Transcribe, Whisper-1
 - Multiple output formats: text, json, verbose_json, srt, vtt
+- SRT/VTT timestamp offsetting for correct timing across chunks
 - Language detection (auto or manual selection from 11 languages)
 - Optional prompt for domain-specific vocabulary hints
 - API key stored locally in browser (never sent to any server other than OpenAI)
@@ -30,6 +35,7 @@ Upload an audio file, provide your OpenAI API key, and get a transcription back 
 - [Next.js 15](https://nextjs.org/) (App Router)
 - [React 19](https://react.dev/)
 - [Tailwind CSS 3](https://tailwindcss.com/)
+- [ffmpeg.wasm](https://ffmpegwasm.netlify.app/) (client-side audio processing)
 - TypeScript
 
 ## Getting Started

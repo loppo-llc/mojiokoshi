@@ -1,6 +1,8 @@
 'use client'
 
 import { useState, useRef, useCallback, useEffect } from 'react'
+import { useAudioProcessor } from './hooks/useAudioProcessor'
+import type { ProcessingStep } from './lib/types'
 
 const MODELS = [
   { value: 'gpt-4o-transcribe', label: 'GPT-4o Transcribe' },
@@ -30,9 +32,19 @@ const LANGUAGES = [
   { value: 'ru', label: 'Русский' },
 ]
 
-const MAX_FILE_SIZE = 25 * 1024 * 1024 // 25MB
+const MAX_FILE_SIZE = 500 * 1024 * 1024 // 500MB
 const ACCEPTED_TYPES = ['audio/mpeg', 'audio/mp4', 'audio/wav', 'audio/webm', 'audio/x-m4a', 'audio/mp3', 'audio/ogg', 'video/mp4', 'video/webm', 'audio/x-wav', 'audio/aac', 'audio/flac']
 const ACCEPTED_EXTENSIONS = ['.mp3', '.mp4', '.mpeg', '.mpga', '.m4a', '.wav', '.webm', '.ogg', '.flac']
+
+const STEP_LABELS: Record<ProcessingStep, string> = {
+  idle: '',
+  'loading-ffmpeg': 'FFmpeg を読み込み中...',
+  compressing: '音声を圧縮中...',
+  splitting: '音声を分割中...',
+  transcribing: '文字起こし中...',
+  done: '完了',
+  error: 'エラー',
+}
 
 function formatFileSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`
@@ -42,7 +54,7 @@ function formatFileSize(bytes: number) {
 
 function validateFile(file: File): string | null {
   if (file.size > MAX_FILE_SIZE) {
-    return `ファイルサイズが大きすぎます（${formatFileSize(file.size)}）。最大 25MB です`
+    return `ファイルサイズが大きすぎます（${formatFileSize(file.size)}）。最大 500MB です`
   }
   const ext = '.' + file.name.split('.').pop()?.toLowerCase()
   const typeOk = ACCEPTED_TYPES.includes(file.type) || ACCEPTED_EXTENSIONS.includes(ext)
@@ -67,6 +79,8 @@ export default function Home() {
   const [showApiKey, setShowApiKey] = useState(false)
 
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const submitIdRef = useRef(0)
+  const { processAndTranscribe, status, cancel } = useAudioProcessor()
 
   useEffect(() => {
     const saved = localStorage.getItem('mojiokoshi_api_key')
@@ -124,41 +138,38 @@ export default function Home() {
       return
     }
 
+    const currentSubmitId = ++submitIdRef.current
     setIsLoading(true)
     setError(null)
     setResult('')
 
-    const formData = new FormData()
-    formData.append('file', file)
-    formData.append('apiKey', apiKey)
-    formData.append('model', model)
-    formData.append('response_format', responseFormat)
-    if (language) formData.append('language', language)
-    if (prompt) formData.append('prompt', prompt)
-
     try {
-      const res = await fetch('/api/transcribe', {
-        method: 'POST',
-        body: formData,
+      const text = await processAndTranscribe(file, {
+        apiKey,
+        model,
+        responseFormat,
+        language,
+        prompt,
       })
-
-      const data = await res.json()
-
-      if (!res.ok) {
-        setError(data.error || 'エラーが発生しました')
-        return
+      if (submitIdRef.current !== currentSubmitId) return
+      setResult(text)
+    } catch (err) {
+      if (submitIdRef.current !== currentSubmitId) return
+      const msg = err instanceof Error ? err.message : 'エラーが発生しました'
+      if (msg !== 'キャンセルされました') {
+        setError(msg)
       }
-
-      if (responseFormat === 'json' || responseFormat === 'verbose_json') {
-        setResult(JSON.stringify(data, null, 2))
-      } else {
-        setResult(data.text || JSON.stringify(data, null, 2))
-      }
-    } catch {
-      setError('リクエストに失敗しました')
     } finally {
-      setIsLoading(false)
+      if (submitIdRef.current === currentSubmitId) {
+        setIsLoading(false)
+      }
     }
+  }
+
+  const handleCancel = () => {
+    submitIdRef.current++
+    cancel()
+    setIsLoading(false)
   }
 
   const copyToClipboard = async () => {
@@ -170,6 +181,8 @@ export default function Home() {
       setError('クリップボードへのコピーに失敗しました')
     }
   }
+
+  const isProcessing = isLoading && status.step !== 'idle' && status.step !== 'done' && status.step !== 'error'
 
   return (
     <>
@@ -203,7 +216,7 @@ export default function Home() {
             <input
               ref={fileInputRef}
               type="file"
-              accept="audio/*,.mp3,.mp4,.mpeg,.mpga,.m4a,.wav,.webm"
+              accept="audio/*,.mp3,.mp4,.mpeg,.mpga,.m4a,.wav,.webm,.ogg,.flac"
               onChange={handleFileSelect}
               className="hidden"
             />
@@ -229,7 +242,7 @@ export default function Home() {
                   ドラッグ＆ドロップ または クリックで選択
                 </p>
                 <p className="text-text-tertiary text-xs">
-                  mp3, wav, m4a, mp4, webm &mdash; 最大 25MB
+                  mp3, wav, m4a, mp4, webm &mdash; 最大 500MB
                 </p>
               </>
             )}
@@ -334,26 +347,49 @@ export default function Home() {
 
           {/* Submit */}
           <button
-            onClick={handleSubmit}
-            disabled={isLoading || !file || !apiKey}
-            className="btn-primary w-full bg-accent hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed text-surface-primary font-medium py-3.5 rounded-lg text-sm tracking-wide transition-all"
+            onClick={isLoading ? handleCancel : handleSubmit}
+            disabled={!isLoading && (!file || !apiKey)}
+            className={`btn-primary w-full font-medium py-3.5 rounded-lg text-sm tracking-wide transition-all ${
+              isLoading
+                ? 'bg-red-500/80 hover:bg-red-500 text-white'
+                : 'bg-accent hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed text-surface-primary'
+            }`}
           >
             {isLoading ? (
               <span className="flex items-center justify-center gap-3">
-                <span className="flex items-center gap-[3px] h-5">
-                  {[...Array(7)].map((_, i) => (
-                    <span
-                      key={i}
-                      className="waveform-bar w-[3px] bg-surface-primary/60 rounded-full"
-                    />
-                  ))}
-                </span>
-                文字起こし中...
+                キャンセル
               </span>
             ) : (
               '文字起こしを開始'
             )}
           </button>
+
+          {/* Processing Status */}
+          {isProcessing && (
+            <div className="mt-4 result-appear">
+              <div className="flex items-center gap-3 mb-2">
+                <span className="flex items-center gap-[3px] h-5">
+                  {[...Array(7)].map((_, i) => (
+                    <span
+                      key={i}
+                      className="waveform-bar w-[3px] bg-accent/60 rounded-full"
+                    />
+                  ))}
+                </span>
+                <span className="text-sm text-text-secondary">
+                  {status.detail || STEP_LABELS[status.step]}
+                </span>
+              </div>
+              {status.progress > 0 && (
+                <div className="w-full h-1 bg-surface-card rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-accent rounded-full transition-all duration-300"
+                    style={{ width: `${status.progress}%` }}
+                  />
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Error */}
           {error && (
