@@ -579,7 +579,7 @@ export default function Home() {
 
           {process.env.NEXT_PUBLIC_COMMIT_HASH && (
             <p className="text-center text-[9px] font-mono">
-              <a href={`https://github.com/loppo-llc/mojiokoshi/commit/${process.env.NEXT_PUBLIC_COMMIT_HASH}`} target="_blank" rel="noopener noreferrer" className="text-text-tertiary/40 hover:text-text-tertiary transition-colors">
+              <a href="https://github.com/loppo-llc/mojiokoshi" target="_blank" rel="noopener noreferrer" className="text-text-tertiary/40 hover:text-text-tertiary transition-colors">
                 {process.env.NEXT_PUBLIC_COMMIT_HASH}
               </a>
             </p>
