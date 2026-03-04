@@ -37,7 +37,7 @@ export const metadata: Metadata = {
     url: '/',
     type: 'website',
     locale: 'ja_JP',
-    images: [{ url: '/og.jpg', width: 1200, height: 1100 }],
+    images: [{ url: '/og.jpg', width: 1200, height: 1346 }],
   },
   twitter: {
     card: 'summary',
