@@ -10,6 +10,30 @@ const MAX_DIRECT_SIZE = 25 * 1024 * 1024 // 25MB
 const SEGMENT_SECONDS = 600 // 10 minutes
 const MAX_RETRIES = 2
 
+const COMPRESSED_EXTENSIONS = new Set(['mp3', 'm4a', 'aac', 'ogg', 'webm', 'mp4', 'opus', 'mpeg', 'mpga'])
+
+function isCompressedAudio(filename: string): boolean {
+  const ext = filename.split('.').pop()?.toLowerCase() || ''
+  return COMPRESSED_EXTENSIONS.has(ext)
+}
+
+const MIME_BY_EXT: Record<string, string> = {
+  mp3: 'audio/mpeg',
+  m4a: 'audio/mp4',
+  aac: 'audio/aac',
+  ogg: 'audio/ogg',
+  webm: 'audio/webm',
+  mp4: 'audio/mp4',
+  opus: 'audio/ogg',
+  mpeg: 'audio/mpeg',
+  mpga: 'audio/mpeg',
+}
+
+function getAudioMimeType(filename: string): string {
+  const ext = filename.split('.').pop()?.toLowerCase() || ''
+  return MIME_BY_EXT[ext] || 'audio/mpeg'
+}
+
 async function transcribeChunk(
   file: File | Blob,
   filename: string,
@@ -154,74 +178,172 @@ export function useAudioProcessor() {
 
         if (isCancelled()) throw new Error('キャンセルされました')
 
-        // Compress to MP3 128kbps mono
-        setStatus({ step: 'compressing', detail: '音声を圧縮中...', progress: 0 })
         const prefix = `j${currentJobId}_`
-        const inputName = `${prefix}input${getExtension(file.name)}`
+        const ext = getExtension(file.name)
+        const inputName = `${prefix}input${ext}`
         trackedFiles.push(inputName)
         await ffmpeg.writeFile(inputName, await fetchFile(file))
 
-        const progressHandler = ({ progress }: { progress: number }) => {
-          if (isCancelled()) return
-          setStatus((prev) => ({
-            ...prev,
-            progress: Math.round(progress * 100),
-          }))
-        }
-        ffmpeg.on('progress', progressHandler)
-
-        try {
-          await ffmpeg.exec([
-            '-i', inputName,
-            '-b:a', '128k',
-            '-ac', '1',
-            '-y',
-            `${prefix}compressed.mp3`,
-          ])
-        } finally {
-          ffmpeg.off('progress', progressHandler)
-        }
-        trackedFiles.push(`${prefix}compressed.mp3`)
-
         if (isCancelled()) throw new Error('キャンセルされました')
 
-        // Check compressed size
-        const compressedRaw = await ffmpeg.readFile(`${prefix}compressed.mp3`) as Uint8Array
-        const compressedData = new Uint8Array(compressedRaw)
-        const compressedBlob = new Blob([compressedData], { type: 'audio/mpeg' })
+        let chunkExt = '.mp3'
+        let chunkMime = 'audio/mpeg'
 
-        if (compressedBlob.size <= MAX_DIRECT_SIZE) {
-          setStatus({ step: 'transcribing', detail: '文字起こし中...', progress: 0 })
-          const result = await transcribeChunk(
-            new File([compressedBlob], 'audio.mp3', { type: 'audio/mpeg' }),
-            'audio.mp3',
-            options,
-            abortController.signal,
-          )
+        if (isCompressedAudio(file.name)) {
+          // Compressed audio: try splitting directly without recompression
+          let directSplitOk = false
+          try {
+            setStatus({ step: 'splitting', detail: '音声を分割中...', progress: 0 })
+            await ffmpeg.exec([
+              '-i', inputName,
+              '-f', 'segment',
+              '-segment_time', String(SEGMENT_SECONDS),
+              '-c', 'copy',
+              '-y',
+              `${prefix}chunk_%03d${ext}`,
+            ])
+            chunkExt = ext
+            chunkMime = getAudioMimeType(file.name)
+            directSplitOk = true
+          } catch {
+            // Direct split failed (container quirks, etc.) — clean up partial chunks
+            for (let i = 0; i < 999; i++) {
+              const name = `${prefix}chunk_${String(i).padStart(3, '0')}${ext}`
+              try { await ffmpeg.deleteFile(name) } catch { break }
+            }
+          }
+
           if (isCancelled()) throw new Error('キャンセルされました')
-          await cleanup(ffmpeg, trackedFiles)
+
+          if (!directSplitOk) {
+            // Fall back: recompress to MP3 then split
+            setStatus({ step: 'compressing', detail: '音声を圧縮中（フォールバック）...', progress: 0 })
+
+            const progressHandler = ({ progress }: { progress: number }) => {
+              if (isCancelled()) return
+              setStatus((prev) => ({
+                ...prev,
+                progress: Math.round(progress * 100),
+              }))
+            }
+            ffmpeg.on('progress', progressHandler)
+
+            try {
+              await ffmpeg.exec([
+                '-i', inputName,
+                '-b:a', '128k',
+                '-ac', '1',
+                '-y',
+                `${prefix}compressed.mp3`,
+              ])
+            } finally {
+              ffmpeg.off('progress', progressHandler)
+            }
+            trackedFiles.push(`${prefix}compressed.mp3`)
+
+            if (isCancelled()) throw new Error('キャンセルされました')
+
+            const compressedRaw = await ffmpeg.readFile(`${prefix}compressed.mp3`) as Uint8Array
+            const compressedData = new Uint8Array(compressedRaw)
+            const compressedBlob = new Blob([compressedData], { type: 'audio/mpeg' })
+
+            if (compressedBlob.size <= MAX_DIRECT_SIZE) {
+              setStatus({ step: 'transcribing', detail: '文字起こし中...', progress: 0 })
+              const result = await transcribeChunk(
+                new File([compressedBlob], 'audio.mp3', { type: 'audio/mpeg' }),
+                'audio.mp3',
+                options,
+                abortController.signal,
+              )
+              if (isCancelled()) throw new Error('キャンセルされました')
+              await cleanup(ffmpeg, trackedFiles)
+              if (isCancelled()) throw new Error('キャンセルされました')
+              setStatus({ step: 'done', detail: '', progress: 100 })
+              return result
+            }
+
+            chunkExt = '.mp3'
+            chunkMime = 'audio/mpeg'
+
+            setStatus({ step: 'splitting', detail: '音声を分割中...', progress: 0 })
+            await ffmpeg.exec([
+              '-i', `${prefix}compressed.mp3`,
+              '-f', 'segment',
+              '-segment_time', String(SEGMENT_SECONDS),
+              '-c', 'copy',
+              '-y',
+              `${prefix}chunk_%03d.mp3`,
+            ])
+          }
+        } else {
+          // Uncompressed audio (wav, flac, etc.): compress first
+          setStatus({ step: 'compressing', detail: '音声を圧縮中...', progress: 0 })
+
+          const progressHandler = ({ progress }: { progress: number }) => {
+            if (isCancelled()) return
+            setStatus((prev) => ({
+              ...prev,
+              progress: Math.round(progress * 100),
+            }))
+          }
+          ffmpeg.on('progress', progressHandler)
+
+          try {
+            await ffmpeg.exec([
+              '-i', inputName,
+              '-b:a', '128k',
+              '-ac', '1',
+              '-y',
+              `${prefix}compressed.mp3`,
+            ])
+          } finally {
+            ffmpeg.off('progress', progressHandler)
+          }
+          trackedFiles.push(`${prefix}compressed.mp3`)
+
           if (isCancelled()) throw new Error('キャンセルされました')
-          setStatus({ step: 'done', detail: '', progress: 100 })
-          return result
+
+          // Check compressed size
+          const compressedRaw = await ffmpeg.readFile(`${prefix}compressed.mp3`) as Uint8Array
+          const compressedData = new Uint8Array(compressedRaw)
+          const compressedBlob = new Blob([compressedData], { type: 'audio/mpeg' })
+
+          if (compressedBlob.size <= MAX_DIRECT_SIZE) {
+            setStatus({ step: 'transcribing', detail: '文字起こし中...', progress: 0 })
+            const result = await transcribeChunk(
+              new File([compressedBlob], 'audio.mp3', { type: 'audio/mpeg' }),
+              'audio.mp3',
+              options,
+              abortController.signal,
+            )
+            if (isCancelled()) throw new Error('キャンセルされました')
+            await cleanup(ffmpeg, trackedFiles)
+            if (isCancelled()) throw new Error('キャンセルされました')
+            setStatus({ step: 'done', detail: '', progress: 100 })
+            return result
+          }
+
+          // Still too large: split compressed file
+          chunkExt = '.mp3'
+          chunkMime = 'audio/mpeg'
+
+          setStatus({ step: 'splitting', detail: '音声を分割中...', progress: 0 })
+          await ffmpeg.exec([
+            '-i', `${prefix}compressed.mp3`,
+            '-f', 'segment',
+            '-segment_time', String(SEGMENT_SECONDS),
+            '-c', 'copy',
+            '-y',
+            `${prefix}chunk_%03d.mp3`,
+          ])
         }
-
-        // Need to split
-        setStatus({ step: 'splitting', detail: '音声を分割中...', progress: 0 })
-        await ffmpeg.exec([
-          '-i', `${prefix}compressed.mp3`,
-          '-f', 'segment',
-          '-segment_time', String(SEGMENT_SECONDS),
-          '-c', 'copy',
-          '-y',
-          `${prefix}chunk_%03d.mp3`,
-        ])
 
         if (isCancelled()) throw new Error('キャンセルされました')
 
         // Find chunk files
         const chunkFiles: string[] = []
         for (let i = 0; i < 999; i++) {
-          const name = `${prefix}chunk_${String(i).padStart(3, '0')}.mp3`
+          const name = `${prefix}chunk_${String(i).padStart(3, '0')}${chunkExt}`
           try {
             const data = await ffmpeg.readFile(name)
             if (data instanceof Uint8Array && data.length > 0) {
@@ -267,13 +389,36 @@ export function useAudioProcessor() {
 
           const chunkRaw = await ffmpeg.readFile(chunkFiles[i]) as Uint8Array
           const chunkData = new Uint8Array(chunkRaw)
-          const chunkBlob = new Blob([chunkData], { type: 'audio/mpeg' })
-          const chunkFile = new File([chunkBlob], chunkFiles[i], { type: 'audio/mpeg' })
+
+          let chunkBlob: Blob
+          let chunkFilename: string
+
+          if (chunkData.length > MAX_DIRECT_SIZE) {
+            // Rare: chunk exceeds 25MB (high-bitrate compressed audio)
+            const tmpIn = `${prefix}oversize_in${chunkExt}`
+            const tmpOut = `${prefix}oversize_out.mp3`
+            trackedFiles.push(tmpIn, tmpOut)
+            try {
+              await ffmpeg.writeFile(tmpIn, chunkData)
+              await ffmpeg.exec(['-i', tmpIn, '-b:a', '128k', '-ac', '1', '-y', tmpOut])
+              const recompressed = await ffmpeg.readFile(tmpOut) as Uint8Array
+              chunkBlob = new Blob([new Uint8Array(recompressed)], { type: 'audio/mpeg' })
+              chunkFilename = `chunk_${i}.mp3`
+            } finally {
+              try { await ffmpeg.deleteFile(tmpIn) } catch { /* ignore */ }
+              try { await ffmpeg.deleteFile(tmpOut) } catch { /* ignore */ }
+            }
+          } else {
+            chunkBlob = new Blob([chunkData], { type: chunkMime })
+            chunkFilename = chunkFiles[i]
+          }
+
+          const chunkFile = new File([chunkBlob], chunkFilename, { type: chunkBlob.type })
 
           let result: string | null = null
           for (let retry = 0; retry <= MAX_RETRIES; retry++) {
             try {
-              result = await transcribeChunk(chunkFile, chunkFiles[i], {
+              result = await transcribeChunk(chunkFile, chunkFilename, {
                 ...options,
                 prompt: prevText,
               }, abortController.signal)
