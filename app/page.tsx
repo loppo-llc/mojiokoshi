@@ -535,10 +535,6 @@ export default function Home() {
 
         {/* Footer */}
         <footer className="mt-20 w-full max-w-2xl">
-          <p className="text-center text-text-tertiary text-[11px] font-mono tracking-wide mb-8">
-            Powered by OpenAI Speech-to-Text API
-          </p>
-
           {/* Terms */}
           <div className="divider-accent mb-6" />
           <div className="mb-6">
@@ -575,7 +571,11 @@ export default function Home() {
               </li>
             </ol>
           </div>
-          <div className="divider-accent mb-4" />
+          <div className="divider-accent mb-6" />
+
+          <p className="text-center text-text-tertiary text-[11px] font-mono tracking-wide mb-4">
+            Powered by OpenAI Speech-to-Text API
+          </p>
 
           {process.env.NEXT_PUBLIC_COMMIT_HASH && (
             <p className="text-center text-text-tertiary/40 text-[9px] font-mono">
