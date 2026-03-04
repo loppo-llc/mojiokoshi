@@ -14,8 +14,8 @@ const FORMATS = [
   { value: 'text', label: 'text' },
   { value: 'json', label: 'json' },
   { value: 'verbose_json', label: 'verbose_json' },
-  { value: 'srt', label: 'srt' },
-  { value: 'vtt', label: 'vtt' },
+  { value: 'srt', label: 'srt', whisperOnly: true },
+  { value: 'vtt', label: 'vtt', whisperOnly: true },
 ]
 
 const LANGUAGES = [
@@ -69,6 +69,7 @@ export default function Home() {
   const [file, setFile] = useState<File | null>(null)
   const [model, setModel] = useState('gpt-4o-transcribe')
   const [responseFormat, setResponseFormat] = useState('text')
+  const isWhisper = model === 'whisper-1'
   const [language, setLanguage] = useState('')
   const [prompt, setPrompt] = useState('')
   const [result, setResult] = useState('')
@@ -94,6 +95,13 @@ export default function Home() {
       localStorage.removeItem('mojiokoshi_api_key')
     }
   }, [apiKey])
+
+  useEffect(() => {
+    const fmt = FORMATS.find((f) => f.value === responseFormat)
+    if (fmt && 'whisperOnly' in fmt && fmt.whisperOnly && !isWhisper) {
+      setResponseFormat('text')
+    }
+  }, [model, responseFormat, isWhisper])
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -143,11 +151,17 @@ export default function Home() {
     setError(null)
     setResult('')
 
+    // Guard: force text if whisperOnly format on non-whisper model
+    const fmt = FORMATS.find((f) => f.value === responseFormat)
+    const safeFormat = (fmt && 'whisperOnly' in fmt && fmt.whisperOnly && model !== 'whisper-1')
+      ? 'text'
+      : responseFormat
+
     try {
       const text = await processAndTranscribe(file, {
         apiKey,
         model,
-        responseFormat,
+        responseFormat: safeFormat,
         language,
         prompt,
       })
@@ -311,21 +325,25 @@ export default function Home() {
                 Format
               </label>
               <div className="flex flex-wrap gap-2">
-                {FORMATS.map((f) => (
-                  <div key={f.value} className="format-option">
+                {FORMATS.map((f) => {
+                  const disabled = 'whisperOnly' in f && f.whisperOnly && !isWhisper
+                  return (
+                  <div key={f.value} className={`format-option ${disabled ? 'opacity-30 pointer-events-none' : ''}`}>
                     <input
                       type="radio"
                       name="format"
                       id={`format-${f.value}`}
                       value={f.value}
                       checked={responseFormat === f.value}
+                      disabled={disabled}
                       onChange={(e) => setResponseFormat(e.target.value)}
                     />
                     <label htmlFor={`format-${f.value}`}>
                       {f.label}
                     </label>
                   </div>
-                ))}
+                  )
+                })}
               </div>
             </div>
 

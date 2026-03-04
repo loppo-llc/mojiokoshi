@@ -52,6 +52,14 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    const WHISPER_ONLY_FORMATS = ['srt', 'vtt']
+    if (WHISPER_ONLY_FORMATS.includes(responseFormat) && model !== 'whisper-1') {
+      return NextResponse.json(
+        { error: `${responseFormat} 形式は Whisper-1 モデルでのみ使用できます` },
+        { status: 400 },
+      )
+    }
+
     const openaiFormData = new FormData()
     openaiFormData.append('file', file)
     openaiFormData.append('model', model)
