@@ -20,9 +20,31 @@ const jetbrainsMono = JetBrains_Mono({
   display: 'swap',
 })
 
+const title = '文字起こし — mojiokoshi'
+const description = 'OpenAI Speech-to-Text による音声文字起こし'
+
+const baseUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL
+  ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
+  : 'http://localhost:3000'
+
 export const metadata: Metadata = {
-  title: '文字起こし — mojiokoshi',
-  description: 'OpenAI Speech-to-Text による音声文字起こし',
+  metadataBase: new URL(baseUrl),
+  title,
+  description,
+  openGraph: {
+    title,
+    description,
+    url: '/',
+    type: 'website',
+    locale: 'ja_JP',
+    images: [{ url: '/og.jpg', width: 1200, height: 1100 }],
+  },
+  twitter: {
+    card: 'summary',
+    title,
+    description,
+    images: ['/og.jpg'],
+  },
 }
 
 export default function RootLayout({

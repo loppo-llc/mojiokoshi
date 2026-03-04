@@ -534,12 +534,51 @@ export default function Home() {
         </div>
 
         {/* Footer */}
-        <footer className="mt-16 text-center space-y-1">
-          <p className="text-text-tertiary text-[11px] font-mono tracking-wide">
+        <footer className="mt-20 w-full max-w-2xl">
+          <p className="text-center text-text-tertiary text-[11px] font-mono tracking-wide mb-8">
             Powered by OpenAI Speech-to-Text API
           </p>
+
+          {/* Terms */}
+          <div className="divider-accent mb-6" />
+          <div className="mb-6">
+            <p className="font-mono text-[9px] tracking-[0.3em] uppercase text-text-tertiary mb-4">
+              Terms of Use
+            </p>
+            <ol className="list-none space-y-1.5 text-[10px] leading-[1.6] text-text-tertiary font-mono">
+              <li className="flex gap-2">
+                <span className="text-accent/40 select-none shrink-0">01</span>
+                <span>本サービスは現状有姿（as-is）で提供され、正確性・可用性を含むいかなる保証もありません。</span>
+              </li>
+              <li className="flex gap-2">
+                <span className="text-accent/40 select-none shrink-0">02</span>
+                <span>音声データはブラウザ内で圧縮・分割された後、利用者の API キーを用いて OpenAI API へ送信されます。本サービスのサーバーに音声データは保存されません。</span>
+              </li>
+              <li className="flex gap-2">
+                <span className="text-accent/40 select-none shrink-0">03</span>
+                <span>API キーの管理は利用者の責任です。キーはブラウザの localStorage に保存されます。</span>
+              </li>
+              <li className="flex gap-2">
+                <span className="text-accent/40 select-none shrink-0">04</span>
+                <span>本サービスの利用により生じた損害について、開発者は一切の責任を負いません。</span>
+              </li>
+              <li className="flex gap-2">
+                <span className="text-accent/40 select-none shrink-0">05</span>
+                <span>本サービスの利用には{' '}
+                  <a href="https://openai.com/policies/terms-of-use" target="_blank" rel="noopener noreferrer" className="text-accent/60 hover:text-accent transition-colors">OpenAI 利用規約</a>
+                  {' '}への同意が必要です。
+                </span>
+              </li>
+              <li className="flex gap-2">
+                <span className="text-accent/40 select-none shrink-0">06</span>
+                <span>本規約は予告なく変更される場合があります。</span>
+              </li>
+            </ol>
+          </div>
+          <div className="divider-accent mb-4" />
+
           {process.env.NEXT_PUBLIC_COMMIT_HASH && (
-            <p className="text-text-tertiary/50 text-[10px] font-mono">
+            <p className="text-center text-text-tertiary/40 text-[9px] font-mono">
               {process.env.NEXT_PUBLIC_COMMIT_HASH}
             </p>
           )}
