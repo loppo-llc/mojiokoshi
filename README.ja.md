@@ -13,7 +13,7 @@
 
 オーディオファイルをアップロードし、OpenAI API キーを入力するだけで、プレーンテキスト・JSON・SRT・VTT 形式で文字起こし結果を取得できます。
 
-![mojiokoshi スクリーンショット](docs/screenshot.jpg)
+![mojiokoshi スクリーンショット](public/og.jpg)
 
 ## 機能
 

@@ -10,6 +10,7 @@ export type ProcessingStep =
 export interface ProcessingStatus {
   step: ProcessingStep
   detail: string
+  detailParams?: Record<string, string | number>
   progress: number // 0-100
 }
 

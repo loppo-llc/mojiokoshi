@@ -170,10 +170,10 @@ export function useAudioProcessor() {
   const retryChunk = useCallback(
     async (index: number): Promise<string> => {
       const opts = jobOptionsRef.current
-      if (!opts) throw new Error('実行オプションが見つかりません')
+      if (!opts) throw new Error('error.noOptions')
 
       const chunkFile = chunkBlobsRef.current[index]
-      if (!chunkFile) throw new Error('チャンクデータが見つかりません')
+      if (!chunkFile) throw new Error('error.noChunkData')
 
       const retryJobId = jobIdRef.current
       const abortController = new AbortController()
@@ -198,7 +198,7 @@ export function useAudioProcessor() {
         }, abortController.signal)
 
         // Check if job changed during retry
-        if (jobIdRef.current !== retryJobId) throw new Error('キャンセルされました')
+        if (jobIdRef.current !== retryJobId) throw new Error('error.cancelled')
 
         // Update chunk result
         updateChunkResults((prev) =>
@@ -242,15 +242,15 @@ export function useAudioProcessor() {
 
       // Small file: direct transcribe
       if (file.size <= MAX_DIRECT_SIZE) {
-        setStatus({ step: 'transcribing', detail: '文字起こし中...', progress: 0 })
+        setStatus({ step: 'transcribing', detail: 'status.transcribing', progress: 0 })
         try {
           const result = await transcribeChunk(file, file.name, options, abortController.signal)
-          if (isCancelled()) throw new Error('キャンセルされました')
+          if (isCancelled()) throw new Error('error.cancelled')
           setStatus({ step: 'done', detail: '', progress: 100 })
           return result
         } catch (err) {
-          if (isCancelled()) throw new Error('キャンセルされました')
-          const msg = err instanceof Error ? err.message : 'エラーが発生しました'
+          if (isCancelled()) throw new Error('error.cancelled')
+          const msg = err instanceof Error ? err.message : 'error.generic'
           setStatus({ step: 'error', detail: msg, progress: 0 })
           throw err
         }
@@ -260,10 +260,10 @@ export function useAudioProcessor() {
       const trackedFiles: string[] = []
 
       try {
-        setStatus({ step: 'loading-ffmpeg', detail: 'FFmpeg を読み込み中...', progress: 0 })
+        setStatus({ step: 'loading-ffmpeg', detail: 'status.loadingFfmpeg', progress: 0 })
         const ffmpeg = await loadFFmpeg()
 
-        if (isCancelled()) throw new Error('キャンセルされました')
+        if (isCancelled()) throw new Error('error.cancelled')
 
         const prefix = `j${currentJobId}_`
         const ext = getExtension(file.name)
@@ -271,7 +271,7 @@ export function useAudioProcessor() {
         trackedFiles.push(inputName)
         await ffmpeg.writeFile(inputName, await fetchFile(file))
 
-        if (isCancelled()) throw new Error('キャンセルされました')
+        if (isCancelled()) throw new Error('error.cancelled')
 
         let chunkExt = '.mp3'
         let chunkMime = 'audio/mpeg'
@@ -280,7 +280,7 @@ export function useAudioProcessor() {
           // Compressed audio: try splitting directly without recompression
           let directSplitOk = false
           try {
-            setStatus({ step: 'splitting', detail: '音声を分割中...', progress: 0 })
+            setStatus({ step: 'splitting', detail: 'status.splitting', progress: 0 })
             await ffmpeg.exec([
               '-i', inputName,
               '-f', 'segment',
@@ -300,11 +300,11 @@ export function useAudioProcessor() {
             }
           }
 
-          if (isCancelled()) throw new Error('キャンセルされました')
+          if (isCancelled()) throw new Error('error.cancelled')
 
           if (!directSplitOk) {
             // Fall back: recompress to MP3 then split
-            setStatus({ step: 'compressing', detail: '音声を圧縮中（フォールバック）...', progress: 0 })
+            setStatus({ step: 'compressing', detail: 'status.compressingFallback', progress: 0 })
 
             const progressHandler = ({ progress }: { progress: number }) => {
               if (isCancelled()) return
@@ -328,23 +328,23 @@ export function useAudioProcessor() {
             }
             trackedFiles.push(`${prefix}compressed.mp3`)
 
-            if (isCancelled()) throw new Error('キャンセルされました')
+            if (isCancelled()) throw new Error('error.cancelled')
 
             const compressedRaw = await ffmpeg.readFile(`${prefix}compressed.mp3`) as Uint8Array
             const compressedData = new Uint8Array(compressedRaw)
             const compressedBlob = new Blob([compressedData], { type: 'audio/mpeg' })
 
             if (compressedBlob.size <= MAX_DIRECT_SIZE) {
-              setStatus({ step: 'transcribing', detail: '文字起こし中...', progress: 0 })
+              setStatus({ step: 'transcribing', detail: 'status.transcribing', progress: 0 })
               const result = await transcribeChunk(
                 new File([compressedBlob], 'audio.mp3', { type: 'audio/mpeg' }),
                 'audio.mp3',
                 options,
                 abortController.signal,
               )
-              if (isCancelled()) throw new Error('キャンセルされました')
+              if (isCancelled()) throw new Error('error.cancelled')
               await cleanup(ffmpeg, trackedFiles)
-              if (isCancelled()) throw new Error('キャンセルされました')
+              if (isCancelled()) throw new Error('error.cancelled')
               setStatus({ step: 'done', detail: '', progress: 100 })
               return result
             }
@@ -352,7 +352,7 @@ export function useAudioProcessor() {
             chunkExt = '.mp3'
             chunkMime = 'audio/mpeg'
 
-            setStatus({ step: 'splitting', detail: '音声を分割中...', progress: 0 })
+            setStatus({ step: 'splitting', detail: 'status.splitting', progress: 0 })
             await ffmpeg.exec([
               '-i', `${prefix}compressed.mp3`,
               '-f', 'segment',
@@ -364,7 +364,7 @@ export function useAudioProcessor() {
           }
         } else {
           // Uncompressed audio (wav, flac, etc.): compress first
-          setStatus({ step: 'compressing', detail: '音声を圧縮中...', progress: 0 })
+          setStatus({ step: 'compressing', detail: 'status.compressing', progress: 0 })
 
           const progressHandler = ({ progress }: { progress: number }) => {
             if (isCancelled()) return
@@ -388,7 +388,7 @@ export function useAudioProcessor() {
           }
           trackedFiles.push(`${prefix}compressed.mp3`)
 
-          if (isCancelled()) throw new Error('キャンセルされました')
+          if (isCancelled()) throw new Error('error.cancelled')
 
           // Check compressed size
           const compressedRaw = await ffmpeg.readFile(`${prefix}compressed.mp3`) as Uint8Array
@@ -396,16 +396,16 @@ export function useAudioProcessor() {
           const compressedBlob = new Blob([compressedData], { type: 'audio/mpeg' })
 
           if (compressedBlob.size <= MAX_DIRECT_SIZE) {
-            setStatus({ step: 'transcribing', detail: '文字起こし中...', progress: 0 })
+            setStatus({ step: 'transcribing', detail: 'status.transcribing', progress: 0 })
             const result = await transcribeChunk(
               new File([compressedBlob], 'audio.mp3', { type: 'audio/mpeg' }),
               'audio.mp3',
               options,
               abortController.signal,
             )
-            if (isCancelled()) throw new Error('キャンセルされました')
+            if (isCancelled()) throw new Error('error.cancelled')
             await cleanup(ffmpeg, trackedFiles)
-            if (isCancelled()) throw new Error('キャンセルされました')
+            if (isCancelled()) throw new Error('error.cancelled')
             setStatus({ step: 'done', detail: '', progress: 100 })
             return result
           }
@@ -414,7 +414,7 @@ export function useAudioProcessor() {
           chunkExt = '.mp3'
           chunkMime = 'audio/mpeg'
 
-          setStatus({ step: 'splitting', detail: '音声を分割中...', progress: 0 })
+          setStatus({ step: 'splitting', detail: 'status.splitting', progress: 0 })
           await ffmpeg.exec([
             '-i', `${prefix}compressed.mp3`,
             '-f', 'segment',
@@ -425,7 +425,7 @@ export function useAudioProcessor() {
           ])
         }
 
-        if (isCancelled()) throw new Error('キャンセルされました')
+        if (isCancelled()) throw new Error('error.cancelled')
 
         // Find chunk files
         const chunkFiles: string[] = []
@@ -445,7 +445,7 @@ export function useAudioProcessor() {
         }
 
         if (chunkFiles.length === 0) {
-          throw new Error('音声の分割に失敗しました')
+          throw new Error('error.splitFailed')
         }
 
         // Get durations for each chunk and save chunk File objects
@@ -468,7 +468,8 @@ export function useAudioProcessor() {
         // Transcribe each chunk
         setStatus({
           step: 'transcribing',
-          detail: `0 / ${chunkFiles.length} チャンク`,
+          detail: 'status.chunkProgress',
+          detailParams: { current: 0, total: chunkFiles.length },
           progress: 0,
         })
 
@@ -476,11 +477,12 @@ export function useAudioProcessor() {
         let prevText = options.prompt || ''
 
         for (let i = 0; i < chunkFiles.length; i++) {
-          if (isCancelled()) throw new Error('キャンセルされました')
+          if (isCancelled()) throw new Error('error.cancelled')
 
           setStatus({
             step: 'transcribing',
-            detail: `${i + 1} / ${chunkFiles.length} チャンク`,
+            detail: 'status.chunkProgress',
+            detailParams: { current: i + 1, total: chunkFiles.length },
             progress: Math.round(((i) / chunkFiles.length) * 100),
           })
 
@@ -519,7 +521,7 @@ export function useAudioProcessor() {
               }, abortController.signal)
               break
             } catch (err) {
-              if (isCancelled()) throw new Error('キャンセルされました')
+              if (isCancelled()) throw new Error('error.cancelled')
               if (retry === MAX_RETRIES) throw err
               await new Promise((r) => setTimeout(r, 1000 * (retry + 1)))
             }
@@ -543,10 +545,10 @@ export function useAudioProcessor() {
         // Merge results
         const merged = mergeResults(results, chunkDurations, options.responseFormat)
 
-        if (isCancelled()) throw new Error('キャンセルされました')
+        if (isCancelled()) throw new Error('error.cancelled')
 
         await cleanup(ffmpeg, trackedFiles)
-        if (isCancelled()) throw new Error('キャンセルされました')
+        if (isCancelled()) throw new Error('error.cancelled')
         setStatus({ step: 'done', detail: '', progress: 100 })
         return merged
       } catch (err) {
@@ -556,7 +558,7 @@ export function useAudioProcessor() {
           await cleanup(ffmpeg, trackedFiles)
         }
         // Normalize AbortError to cancel message
-        if (isCancelled()) throw new Error('キャンセルされました')
+        if (isCancelled()) throw new Error('error.cancelled')
         throw err
       }
     },

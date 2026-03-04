@@ -1,5 +1,6 @@
 import type { Metadata } from 'next'
 import { Playfair_Display, Outfit, JetBrains_Mono } from 'next/font/google'
+import { I18nProvider } from './i18n/context'
 import './globals.css'
 
 const playfair = Playfair_Display({
@@ -37,10 +38,10 @@ export const metadata: Metadata = {
     url: '/',
     type: 'website',
     locale: 'ja_JP',
-    images: [{ url: '/og.jpg', width: 1200, height: 1346 }],
+    images: [{ url: '/og.jpg', width: 1200, height: 630 }],
   },
   twitter: {
-    card: 'summary',
+    card: 'summary_large_image',
     title,
     description,
     images: ['/og.jpg'],
@@ -55,7 +56,9 @@ export default function RootLayout({
   return (
     <html lang="ja" className={`${playfair.variable} ${outfit.variable} ${jetbrainsMono.variable}`}>
       <body className="font-body bg-surface-primary text-text-primary antialiased">
-        {children}
+        <I18nProvider>
+          {children}
+        </I18nProvider>
       </body>
     </html>
   )

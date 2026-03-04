@@ -2,7 +2,9 @@
 
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { useAudioProcessor } from './hooks/useAudioProcessor'
-import type { ProcessingStep } from './lib/types'
+import { useTranslation } from './i18n/context'
+import { LOCALES, LOCALE_LABELS } from './i18n/types'
+import type { Locale } from './i18n/types'
 
 const MODELS = [
   { value: 'gpt-4o-transcribe', label: 'GPT-4o Transcribe' },
@@ -18,8 +20,8 @@ const FORMATS = [
   { value: 'vtt', label: 'vtt', whisperOnly: true },
 ]
 
-const LANGUAGES = [
-  { value: '', label: '自動検出' },
+const LANGUAGES: { value: string; label?: string; labelKey?: string }[] = [
+  { value: '', labelKey: 'lang.auto' },
   { value: 'ja', label: '日本語' },
   { value: 'en', label: 'English' },
   { value: 'zh', label: '中文' },
@@ -36,15 +38,7 @@ const MAX_FILE_SIZE = 500 * 1024 * 1024 // 500MB
 const ACCEPTED_TYPES = ['audio/mpeg', 'audio/mp4', 'audio/wav', 'audio/webm', 'audio/x-m4a', 'audio/mp3', 'audio/ogg', 'video/mp4', 'video/webm', 'audio/x-wav', 'audio/aac', 'audio/flac']
 const ACCEPTED_EXTENSIONS = ['.mp3', '.mp4', '.mpeg', '.mpga', '.m4a', '.wav', '.webm', '.ogg', '.flac']
 
-const STEP_LABELS: Record<ProcessingStep, string> = {
-  idle: '',
-  'loading-ffmpeg': 'FFmpeg を読み込み中...',
-  compressing: '音声を圧縮中...',
-  splitting: '音声を分割中...',
-  transcribing: '文字起こし中...',
-  done: '完了',
-  error: 'エラー',
-}
+const TERMS_LINK_URL = 'https://openai.com/policies/terms-of-use'
 
 function formatFileSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`
@@ -52,19 +46,35 @@ function formatFileSize(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-function validateFile(file: File): string | null {
+function validateFile(file: File): { key: string; params?: Record<string, string | number> } | null {
   if (file.size > MAX_FILE_SIZE) {
-    return `ファイルサイズが大きすぎます（${formatFileSize(file.size)}）。最大 500MB です`
+    return { key: 'error.fileTooLarge', params: { size: formatFileSize(file.size) } }
   }
   const ext = '.' + file.name.split('.').pop()?.toLowerCase()
   const typeOk = ACCEPTED_TYPES.includes(file.type) || ACCEPTED_EXTENSIONS.includes(ext)
   if (!typeOk) {
-    return '対応していないファイル形式です'
+    return { key: 'error.unsupportedFormat' }
   }
   return null
 }
 
+function renderTermsWithLink(text: string) {
+  const parts = text.split('__LINK__')
+  if (parts.length !== 3) return text
+  return (
+    <>
+      {parts[0]}
+      <a href={TERMS_LINK_URL} target="_blank" rel="noopener noreferrer" className="text-accent/60 hover:text-accent transition-colors">
+        {parts[1]}
+      </a>
+      {parts[2]}
+    </>
+  )
+}
+
 export default function Home() {
+  const { t, locale, setLocale } = useTranslation()
+
   const [apiKey, setApiKey] = useState('')
   const [file, setFile] = useState<File | null>(null)
   const [model, setModel] = useState('gpt-4o-transcribe')
@@ -119,12 +129,12 @@ export default function Home() {
     const err = validateFile(f)
     if (err) {
       setFile(null)
-      setError(err)
+      setError(t(err.key, err.params))
       return
     }
     setFile(f)
     setError(null)
-  }, [])
+  }, [t])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -140,11 +150,11 @@ export default function Home() {
 
   const handleSubmit = async () => {
     if (!apiKey) {
-      setError('API key を入力してください')
+      setError(t('error.noApiKey'))
       return
     }
     if (!file) {
-      setError('オーディオファイルを選択してください')
+      setError(t('error.noFile'))
       return
     }
 
@@ -171,9 +181,9 @@ export default function Home() {
       setResult(text)
     } catch (err) {
       if (submitIdRef.current !== currentSubmitId) return
-      const msg = err instanceof Error ? err.message : 'エラーが発生しました'
-      if (msg !== 'キャンセルされました') {
-        setError(msg)
+      const rawMsg = err instanceof Error ? err.message : 'error.generic'
+      if (rawMsg !== 'error.cancelled') {
+        setError(t(rawMsg))
       }
     } finally {
       if (submitIdRef.current === currentSubmitId) {
@@ -197,9 +207,9 @@ export default function Home() {
       const merged = await retryChunk(index)
       setResult(merged)
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'リトライに失敗しました'
-      if (msg !== 'キャンセルされました') {
-        setError(msg)
+      const rawMsg = err instanceof Error ? err.message : 'error.generic'
+      if (rawMsg !== 'error.cancelled') {
+        setError(t(rawMsg))
       }
     } finally {
       setRetryingIndex(null)
@@ -212,7 +222,7 @@ export default function Home() {
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     } catch {
-      setError('クリップボードへのコピーに失敗しました')
+      setError(t('error.copyFailed'))
     }
   }
 
@@ -226,10 +236,10 @@ export default function Home() {
         {/* Header */}
         <header className="text-center mb-12 md:mb-16">
           <h1 className="font-display text-4xl md:text-6xl tracking-tight mb-3 text-text-primary">
-            文字起こし
+            {t('header.title')}
           </h1>
           <p className="font-mono text-[11px] tracking-[0.35em] uppercase text-text-tertiary">
-            Audio Transcription
+            {t('header.subtitle')}
           </p>
         </header>
 
@@ -245,7 +255,7 @@ export default function Home() {
             onDrop={handleDrop}
             onClick={() => fileInputRef.current?.click()}
             onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInputRef.current?.click() } }}
-            aria-label="オーディオファイルをアップロード"
+            aria-label={t('upload.ariaLabel')}
           >
             <input
               ref={fileInputRef}
@@ -273,10 +283,10 @@ export default function Home() {
                   </svg>
                 </div>
                 <p className="text-text-secondary text-sm mb-1">
-                  ドラッグ＆ドロップ または クリックで選択
+                  {t('upload.dragDrop')}
                 </p>
                 <p className="text-text-tertiary text-xs">
-                  mp3, wav, m4a, mp4, webm &mdash; 最大 500MB
+                  {t('upload.formats')}
                 </p>
               </>
             )}
@@ -287,7 +297,7 @@ export default function Home() {
             {/* API Key */}
             <div>
               <label className="block text-xs text-text-secondary mb-2 tracking-wide">
-                API Key
+                {t('label.apiKey')}
               </label>
               <div className="relative">
                 <input
@@ -302,7 +312,7 @@ export default function Home() {
                   onClick={() => setShowApiKey(!showApiKey)}
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-text-tertiary hover:text-text-secondary text-xs font-mono transition-colors"
                 >
-                  {showApiKey ? 'hide' : 'show'}
+                  {showApiKey ? t('apiKey.hide') : t('apiKey.show')}
                 </button>
               </div>
             </div>
@@ -311,7 +321,7 @@ export default function Home() {
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs text-text-secondary mb-2 tracking-wide">
-                  Model
+                  {t('label.model')}
                 </label>
                 <select
                   value={model}
@@ -325,7 +335,7 @@ export default function Home() {
               </div>
               <div>
                 <label className="block text-xs text-text-secondary mb-2 tracking-wide">
-                  Language
+                  {t('label.language')}
                 </label>
                 <select
                   value={language}
@@ -333,7 +343,7 @@ export default function Home() {
                   className="w-full bg-surface-card border border-border rounded-lg px-4 py-3 text-sm text-text-primary cursor-pointer"
                 >
                   {LANGUAGES.map((l) => (
-                    <option key={l.value} value={l.value}>{l.label}</option>
+                    <option key={l.value} value={l.value}>{l.labelKey ? t(l.labelKey) : l.label}</option>
                   ))}
                 </select>
               </div>
@@ -342,7 +352,7 @@ export default function Home() {
             {/* Response Format */}
             <div>
               <label className="block text-xs text-text-secondary mb-2 tracking-wide">
-                Format
+                {t('label.format')}
               </label>
               <div className="flex flex-wrap gap-2">
                 {FORMATS.map((f) => {
@@ -370,13 +380,13 @@ export default function Home() {
             {/* Prompt */}
             <div>
               <label className="block text-xs text-text-secondary mb-2 tracking-wide">
-                Prompt
-                <span className="text-text-tertiary ml-2">optional</span>
+                {t('label.prompt')}
+                <span className="text-text-tertiary ml-2">{t('label.optional')}</span>
               </label>
               <textarea
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
-                placeholder="固有名詞や専門用語のヒントを入力..."
+                placeholder={t('prompt.placeholder')}
                 rows={2}
                 className="w-full bg-surface-card border border-border rounded-lg px-4 py-3 text-sm text-text-primary placeholder:text-text-tertiary resize-none"
               />
@@ -395,10 +405,10 @@ export default function Home() {
           >
             {isLoading ? (
               <span className="flex items-center justify-center gap-3">
-                キャンセル
+                {t('button.cancel')}
               </span>
             ) : (
-              '文字起こしを開始'
+              t('button.start')
             )}
           </button>
 
@@ -415,7 +425,7 @@ export default function Home() {
                   ))}
                 </span>
                 <span className="text-sm text-text-secondary">
-                  {status.detail || STEP_LABELS[status.step]}
+                  {t(status.detail, status.detailParams)}
                 </span>
               </div>
               {status.progress > 0 && (
@@ -443,7 +453,7 @@ export default function Home() {
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2">
                   <div className="w-1.5 h-1.5 rounded-full bg-accent" />
-                  <span className="text-xs text-text-secondary tracking-wide">結果</span>
+                  <span className="text-xs text-text-secondary tracking-wide">{t('result.title')}</span>
                 </div>
                 <button
                   onClick={copyToClipboard}
@@ -454,14 +464,14 @@ export default function Home() {
                       <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                       </svg>
-                      copied
+                      {t('result.copied')}
                     </>
                   ) : (
                     <>
                       <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
                       </svg>
-                      copy
+                      {t('result.copy')}
                     </>
                   )}
                 </button>
@@ -488,7 +498,7 @@ export default function Home() {
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                     </svg>
                     <span className="font-mono tracking-wide">
-                      チャンク詳細 ({chunkResults.length})
+                      {t('chunk.details')} ({chunkResults.length})
                     </span>
                   </button>
 
@@ -498,7 +508,7 @@ export default function Home() {
                         <div key={chunk.index} className="p-4">
                           <div className="flex items-center justify-between mb-2">
                             <span className="text-xs text-text-secondary font-mono">
-                              チャンク {chunk.index + 1} / {chunkResults.length}
+                              {t('chunk.label', { current: chunk.index + 1, total: chunkResults.length })}
                             </span>
                             {chunk.status === 'retrying' || retryingIndex === chunk.index ? (
                               <span className="flex items-center gap-1.5 text-xs text-accent font-mono">
@@ -506,7 +516,7 @@ export default function Home() {
                                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                                 </svg>
-                                retrying…
+                                {t('chunk.retrying')}
                               </span>
                             ) : (
                               <button
@@ -514,7 +524,7 @@ export default function Home() {
                                 disabled={retryingIndex !== null}
                                 className="text-xs text-text-tertiary hover:text-accent transition-colors font-mono disabled:opacity-30 disabled:cursor-not-allowed"
                               >
-                                retry
+                                {t('chunk.retry')}
                               </button>
                             )}
                           </div>
@@ -539,43 +549,36 @@ export default function Home() {
           <div className="divider-accent mb-6" />
           <div className="mb-6">
             <p className="font-mono text-[9px] tracking-[0.3em] uppercase text-text-tertiary mb-4">
-              Terms of Use
+              {t('terms.title')}
             </p>
             <ol className="list-none space-y-1.5 text-[10px] leading-[1.6] text-text-tertiary font-mono">
-              <li className="flex gap-2">
-                <span className="text-accent/40 select-none shrink-0">01</span>
-                <span>本サービスは現状有姿（as-is）で提供され、正確性・可用性を含むいかなる保証もありません。</span>
-              </li>
-              <li className="flex gap-2">
-                <span className="text-accent/40 select-none shrink-0">02</span>
-                <span>音声データはブラウザ内で圧縮・分割された後、利用者の API キーを用いて OpenAI API へ送信されます。本サービスのサーバーに音声データは保存されません。</span>
-              </li>
-              <li className="flex gap-2">
-                <span className="text-accent/40 select-none shrink-0">03</span>
-                <span>API キーの管理は利用者の責任です。キーはブラウザの localStorage に保存されます。</span>
-              </li>
-              <li className="flex gap-2">
-                <span className="text-accent/40 select-none shrink-0">04</span>
-                <span>本サービスの利用により生じた損害について、開発者は一切の責任を負いません。</span>
-              </li>
-              <li className="flex gap-2">
-                <span className="text-accent/40 select-none shrink-0">05</span>
-                <span>本サービスの利用には{' '}
-                  <a href="https://openai.com/policies/terms-of-use" target="_blank" rel="noopener noreferrer" className="text-accent/60 hover:text-accent transition-colors">OpenAI 利用規約</a>
-                  {' '}への同意が必要です。
-                </span>
-              </li>
-              <li className="flex gap-2">
-                <span className="text-accent/40 select-none shrink-0">06</span>
-                <span>本規約は予告なく変更される場合があります。</span>
-              </li>
+              {(['01', '02', '03', '04', '05', '06'] as const).map((num) => (
+                <li key={num} className="flex gap-2">
+                  <span className="text-accent/40 select-none shrink-0">{num}</span>
+                  <span>
+                    {num === '05' ? renderTermsWithLink(t('terms.05')) : t(`terms.${num}`)}
+                  </span>
+                </li>
+              ))}
             </ol>
           </div>
           <div className="divider-accent mb-6" />
 
           <p className="text-center text-text-tertiary text-[11px] font-mono tracking-wide mb-4">
-            Powered by OpenAI Speech-to-Text API
+            {t('footer.poweredBy')}
           </p>
+
+          <div className="flex items-center justify-center gap-3 mb-4">
+            <select
+              value={locale}
+              onChange={(e) => setLocale(e.target.value as Locale)}
+              className="text-[10px] font-mono text-text-tertiary/50 bg-transparent border-none cursor-pointer outline-none"
+            >
+              {LOCALES.map((l) => (
+                <option key={l} value={l}>{LOCALE_LABELS[l]}</option>
+              ))}
+            </select>
+          </div>
 
           {process.env.NEXT_PUBLIC_COMMIT_HASH && (
             <p className="text-center text-[9px] font-mono">

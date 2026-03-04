@@ -13,7 +13,7 @@ A minimal web application for audio transcription using [OpenAI Speech-to-Text A
 
 Upload an audio file, provide your OpenAI API key, and get a transcription back in plain text, JSON, SRT, or VTT format.
 
-![mojiokoshi screenshot](docs/screenshot.jpg)
+![mojiokoshi screenshot](public/og.jpg)
 
 ## Features
 
