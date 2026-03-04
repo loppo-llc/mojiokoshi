@@ -5,7 +5,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-3-06B6D4?logo=tailwindcss&logoColor=white)](https://tailwindcss.com/)
 [![OpenAI](https://img.shields.io/badge/OpenAI-Speech--to--Text-412991?logo=openai&logoColor=white)](https://platform.openai.com/docs/guides/speech-to-text)
-[![License](https://img.shields.io/badge/License-Proprietary-red)](#license)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 > **[日本語版 README はこちら](README.ja.md)**
 
@@ -60,4 +60,6 @@ This app can be deployed to [Vercel](https://vercel.com) with zero configuration
 
 ## License
 
-This project is proprietary software. All rights reserved by [loppo LLC](https://github.com/loppo-llc). Unauthorized copying, modification, or distribution is prohibited.
+This project is licensed under the [MIT License](LICENSE).
+
+Copyright (c) 2026 Seibe TAKAHASHI / LOPPO, LLC.
