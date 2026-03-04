@@ -5,6 +5,7 @@ import { FFmpeg } from '@ffmpeg/ffmpeg'
 import { toBlobURL, fetchFile } from '@ffmpeg/util'
 import type { ProcessingStatus, TranscribeOptions } from '../lib/types'
 import { mergeResults } from '../lib/subtitle-merger'
+import { transcribeAudio } from '../actions/transcribe'
 
 const MAX_DIRECT_SIZE = 25 * 1024 * 1024 // 25MB
 const SEGMENT_SECONDS = 600 // 10 minutes
@@ -40,6 +41,8 @@ async function transcribeChunk(
   options: TranscribeOptions,
   signal?: AbortSignal,
 ): Promise<string> {
+  if (signal?.aborted) throw new Error('キャンセルされました')
+
   const formData = new FormData()
   formData.append('file', file, filename)
   formData.append('apiKey', options.apiKey)
@@ -48,21 +51,10 @@ async function transcribeChunk(
   if (options.language) formData.append('language', options.language)
   if (options.prompt) formData.append('prompt', options.prompt)
 
-  const res = await fetch('/api/transcribe', {
-    method: 'POST',
-    body: formData,
-    signal,
-  })
+  const data = await transcribeAudio(formData)
 
-  const text = await res.text()
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let data: any
-  try {
-    data = JSON.parse(text)
-  } catch {
-    throw new Error(res.ok ? '予期しないレスポンス形式です' : `API error: ${res.status}`)
-  }
-  if (!res.ok) throw new Error((data.error as string) || `API error: ${res.status}`)
+  if (signal?.aborted) throw new Error('キャンセルされました')
+  if (data.error) throw new Error(data.error)
 
   if (options.responseFormat === 'json' || options.responseFormat === 'verbose_json') {
     return JSON.stringify(data, null, 2)
