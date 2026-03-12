@@ -452,6 +452,12 @@ export function useAudioProcessor() {
 
           const dur = await getFileDuration(ffmpeg, chunkName)
 
+          // Skip negligible final chunks (< 1 second) — API often rejects these
+          if (dur < 1 && results.length > 0) {
+            try { await ffmpeg.deleteFile(chunkName) } catch { /* ignore */ }
+            break
+          }
+
           // Save as File for retry
           let chunkFile = new File(
             [new Blob([chunkData], { type: chunkMime })],
