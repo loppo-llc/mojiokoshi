@@ -91,6 +91,7 @@ export default function Home() {
   const [showChunks, setShowChunks] = useState(false)
   const [retryingIndex, setRetryingIndex] = useState<number | null>(null)
 
+  const promptRestoredRef = useRef(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const submitIdRef = useRef(0)
   const { processAndTranscribe, status, cancel, chunkResults, retryChunk } = useAudioProcessor()
@@ -98,6 +99,8 @@ export default function Home() {
   useEffect(() => {
     const saved = localStorage.getItem('mojiokoshi_api_key')
     if (saved) setApiKey(saved)
+    const savedPrompt = localStorage.getItem('mojiokoshi_prompt')
+    if (savedPrompt) setPrompt(savedPrompt)
   }, [])
 
   useEffect(() => {
@@ -107,6 +110,18 @@ export default function Home() {
       localStorage.removeItem('mojiokoshi_api_key')
     }
   }, [apiKey])
+
+  useEffect(() => {
+    if (!promptRestoredRef.current) {
+      promptRestoredRef.current = true
+      return
+    }
+    if (prompt) {
+      localStorage.setItem('mojiokoshi_prompt', prompt)
+    } else {
+      localStorage.removeItem('mojiokoshi_prompt')
+    }
+  }, [prompt])
 
   useEffect(() => {
     const fmt = FORMATS.find((f) => f.value === responseFormat)
@@ -388,7 +403,7 @@ export default function Home() {
                 onChange={(e) => setPrompt(e.target.value)}
                 placeholder={t('prompt.placeholder')}
                 rows={2}
-                className="w-full bg-surface-card border border-border rounded-lg px-4 py-3 text-sm text-text-primary placeholder:text-text-tertiary resize-none"
+                className="w-full bg-surface-card border border-border rounded-lg px-4 py-3 text-sm text-text-primary placeholder:text-text-tertiary resize-y min-h-[60px]"
               />
             </div>
           </div>
