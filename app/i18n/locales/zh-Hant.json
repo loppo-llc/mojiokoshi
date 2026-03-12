@@ -39,6 +39,7 @@
   "error.copyFailed": "複製到剪貼簿失敗",
   "error.cancelled": "已取消",
   "error.splitFailed": "音訊分割失敗",
+  "error.chunkTooLarge": "即使最小分段也超出此模型的令牌限制",
   "error.noOptions": "找不到處理選項",
   "error.noChunkData": "找不到區塊資料",
   "terms.title": "使用條款",

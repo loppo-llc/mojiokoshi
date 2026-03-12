@@ -39,6 +39,7 @@
   "error.copyFailed": "Failed to copy to clipboard",
   "error.cancelled": "Cancelled",
   "error.splitFailed": "Failed to split audio",
+  "error.chunkTooLarge": "Audio chunk too large for this model even at minimum segment size",
   "error.noOptions": "Processing options not found",
   "error.noChunkData": "Chunk data not found",
   "terms.title": "Terms of Use",

@@ -39,6 +39,7 @@
   "error.copyFailed": "クリップボードへのコピーに失敗しました",
   "error.cancelled": "キャンセルされました",
   "error.splitFailed": "音声の分割に失敗しました",
+  "error.chunkTooLarge": "最小セグメントでもこのモデルのトークン上限を超えています",
   "error.noOptions": "実行オプションが見つかりません",
   "error.noChunkData": "チャンクデータが見つかりません",
   "terms.title": "Terms of Use",

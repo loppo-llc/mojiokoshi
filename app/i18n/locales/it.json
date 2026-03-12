@@ -39,6 +39,7 @@
   "error.copyFailed": "Impossibile copiare negli appunti",
   "error.cancelled": "Annullato",
   "error.splitFailed": "Suddivisione audio non riuscita",
+  "error.chunkTooLarge": "Il segmento audio è troppo grande per questo modello anche alla dimensione minima",
   "error.noOptions": "Opzioni di elaborazione non trovate",
   "error.noChunkData": "Dati del segmento non trovati",
   "terms.title": "Condizioni d'uso",

@@ -259,6 +259,9 @@ export function useAudioProcessor() {
           if (durationMatch) {
             // Extract model-specific max duration and fall through to ffmpeg split path
             maxSegmentSeconds = Math.max(MIN_SEGMENT_SECONDS, Math.floor(parseFloat(durationMatch[1])) - 10)
+          } else if (/tokens.*too large|too large.*tokens/i.test(msg)) {
+            // Token limit exceeded — fall through to ffmpeg split path with reduced segment
+            maxSegmentSeconds = Math.min(maxSegmentSeconds, 600)
           } else {
             setStatus({ step: 'error', detail: msg || 'error.generic', progress: 0 })
             throw err
@@ -407,26 +410,25 @@ export function useAudioProcessor() {
         if (isCancelled()) throw new Error('error.cancelled')
 
         // Interleaved extract + transcribe: extract one chunk, transcribe it, repeat
-        const totalChunks = Math.ceil(totalDuration / effectiveSegmentSeconds)
         const results: string[] = []
         const chunkDurations: number[] = []
         let prevText = options.prompt || ''
+        let offset = 0
+        let chunkIndex = 0
 
-        for (let i = 0; ; i++) {
+        while (offset < totalDuration) {
           if (isCancelled()) throw new Error('error.cancelled')
 
-          const offset = i * effectiveSegmentSeconds
-          if (offset >= totalDuration) break
-
+          const estTotalChunks = chunkIndex + Math.ceil((totalDuration - offset) / effectiveSegmentSeconds)
           setStatus({
             step: 'transcribing',
             detail: 'status.chunkProgress',
-            detailParams: { current: i + 1, total: totalChunks },
-            progress: Math.round((i / totalChunks) * 100),
+            detailParams: { current: chunkIndex + 1, total: estTotalChunks },
+            progress: Math.round((offset / totalDuration) * 100),
           })
 
           // Extract single chunk (frame-level precision is sufficient for transcription)
-          const chunkName = `${prefix}chunk_${String(i).padStart(3, '0')}${chunkExt}`
+          const chunkName = `${prefix}chunk_${String(chunkIndex).padStart(3, '0')}${chunkExt}`
           trackedFiles.push(chunkName)
 
           let chunkData: Uint8Array<ArrayBuffer>
@@ -450,7 +452,6 @@ export function useAudioProcessor() {
           }
 
           const dur = await getFileDuration(ffmpeg, chunkName)
-          chunkDurations.push(dur)
 
           // Save as File for retry
           let chunkFile = new File(
@@ -458,7 +459,7 @@ export function useAudioProcessor() {
             chunkName,
             { type: chunkMime },
           )
-          chunkBlobsRef.current[i] = chunkFile
+          chunkBlobsRef.current[chunkIndex] = chunkFile
 
           // Free ffmpeg memory
           try { await ffmpeg.deleteFile(chunkName) } catch { /* ignore */ }
@@ -475,17 +476,18 @@ export function useAudioProcessor() {
               await ffmpeg.exec(['-i', tmpIn, '-b:a', '128k', '-ac', '1', '-y', tmpOut])
               const recompressed = await ffmpeg.readFile(tmpOut) as Uint8Array
               chunkBlob = new Blob([new Uint8Array(recompressed)], { type: 'audio/mpeg' })
-              chunkFilename = `chunk_${i}.mp3`
-              chunkBlobsRef.current[i] = new File([chunkBlob], chunkFilename, { type: 'audio/mpeg' })
+              chunkFilename = `chunk_${chunkIndex}.mp3`
+              chunkBlobsRef.current[chunkIndex] = new File([chunkBlob], chunkFilename, { type: 'audio/mpeg' })
             } finally {
               try { await ffmpeg.deleteFile(tmpIn) } catch { /* ignore */ }
               try { await ffmpeg.deleteFile(tmpOut) } catch { /* ignore */ }
             }
           }
 
-          // Transcribe with retry
+          // Transcribe with retry (token-too-large triggers segment reduction)
           const fileToSend = new File([chunkBlob], chunkFilename, { type: chunkBlob.type })
           let result: string | null = null
+          let tokenLimitHit = false
           for (let retry = 0; retry <= MAX_RETRIES; retry++) {
             try {
               result = await transcribeChunk(fileToSend, chunkFilename, {
@@ -495,23 +497,43 @@ export function useAudioProcessor() {
               break
             } catch (err) {
               if (isCancelled()) throw new Error('error.cancelled')
+              const errMsg = err instanceof Error ? err.message : ''
+              if (/tokens.*too large|too large.*tokens/i.test(errMsg)) {
+                tokenLimitHit = true
+                break
+              }
               if (retry === MAX_RETRIES) throw err
               await new Promise((r) => setTimeout(r, 1000 * (retry + 1)))
             }
           }
 
+          if (tokenLimitHit) {
+            // Halve segment duration and re-extract from same offset
+            const halved = Math.floor(effectiveSegmentSeconds / 2)
+            if (halved < MIN_SEGMENT_SECONDS) {
+              throw new Error('error.chunkTooLarge')
+            }
+            effectiveSegmentSeconds = halved
+            continue
+          }
+
+          // Advance offset by actual chunk duration (fall back to segment time if detection failed)
+          const advancement = (dur > 0 && dur < effectiveSegmentSeconds * 2) ? dur : effectiveSegmentSeconds
+          chunkDurations.push(advancement)
           results.push(result!)
           prevText = extractLastChars(result!, options.responseFormat, 200)
+          offset += advancement
 
           updateChunkResults((prev) => [
             ...prev,
             {
-              index: i,
+              index: chunkIndex,
               text: result!,
               duration: dur,
               status: 'done' as const,
             },
           ])
+          chunkIndex++
         }
 
         if (results.length === 0) throw new Error('error.splitFailed')
