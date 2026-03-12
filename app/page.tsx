@@ -519,11 +519,11 @@ export default function Home() {
 
                   {showChunks && (
                     <div className="mt-3 bg-surface-card border border-border rounded-xl divide-y divide-border overflow-hidden">
-                      {chunkResults.map((chunk) => (
+                      {chunkResults.map((chunk, arrayIndex) => (
                         <div key={chunk.index} className="p-4">
                           <div className="flex items-center justify-between mb-2">
                             <span className="text-xs text-text-secondary font-mono">
-                              {t('chunk.label', { current: chunk.index + 1, total: chunkResults.length })}
+                              {t('chunk.label', { current: arrayIndex + 1, total: chunkResults.length })}
                             </span>
                             {chunk.status === 'retrying' || retryingIndex === chunk.index ? (
                               <span className="flex items-center gap-1.5 text-xs text-accent font-mono">

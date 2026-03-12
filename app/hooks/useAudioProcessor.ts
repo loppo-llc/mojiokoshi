@@ -419,11 +419,12 @@ export function useAudioProcessor() {
         while (offset < totalDuration) {
           if (isCancelled()) throw new Error('error.cancelled')
 
-          const estTotalChunks = chunkIndex + Math.ceil((totalDuration - offset) / effectiveSegmentSeconds)
+          const estRemaining = Math.ceil(Math.max(0, totalDuration - offset) / effectiveSegmentSeconds)
+          const estTotalChunks = Math.max(results.length + estRemaining, results.length + 1)
           setStatus({
             step: 'transcribing',
             detail: 'status.chunkProgress',
-            detailParams: { current: chunkIndex + 1, total: estTotalChunks },
+            detailParams: { current: results.length + 1, total: estTotalChunks },
             progress: Math.round((offset / totalDuration) * 100),
           })
 
