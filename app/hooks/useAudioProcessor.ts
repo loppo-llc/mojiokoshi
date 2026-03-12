@@ -294,55 +294,39 @@ export function useAudioProcessor() {
           ),
         )
 
-        let chunkExt = '.mp3'
-        let chunkMime = 'audio/mpeg'
+        // Determine split source and parameters
+        let splitSource = inputName
+        let chunkExt = ext
+        let chunkMime = getAudioMimeType(file.name)
+        let effectiveSegmentSeconds = segmentSeconds
 
         if (isCompressedAudio(file.name)) {
-          // Compressed audio: try splitting directly without recompression
-          let directSplitOk = false
+          // Test if direct copy extraction works
+          const testName = `${prefix}test_chunk${ext}`
+          let directCopyOk = false
           try {
-            setStatus({ step: 'splitting', detail: 'status.splitting', progress: 0 })
             await ffmpeg.exec([
-              '-i', inputName,
-              '-f', 'segment',
-              '-segment_time', String(segmentSeconds),
-              '-c', 'copy',
-              '-y',
-              `${prefix}chunk_%03d${ext}`,
+              '-i', inputName, '-ss', '0', '-t', String(segmentSeconds),
+              '-c', 'copy', '-y', testName,
             ])
-            chunkExt = ext
-            chunkMime = getAudioMimeType(file.name)
-            directSplitOk = true
-          } catch {
-            // Direct split failed (container quirks, etc.) — clean up partial chunks
-            for (let i = 0; i < 999; i++) {
-              const name = `${prefix}chunk_${String(i).padStart(3, '0')}${ext}`
-              try { await ffmpeg.deleteFile(name) } catch { break }
-            }
-          }
+            directCopyOk = true
+          } catch { /* direct copy not supported */ }
+          try { await ffmpeg.deleteFile(testName) } catch { /* ignore */ }
 
           if (isCancelled()) throw new Error('error.cancelled')
 
-          if (!directSplitOk) {
-            // Fall back: recompress to MP3 then split
+          if (!directCopyOk) {
+            // Fall back: recompress to MP3
             setStatus({ step: 'compressing', detail: 'status.compressingFallback', progress: 0 })
 
             const progressHandler = ({ progress }: { progress: number }) => {
               if (isCancelled()) return
-              setStatus((prev) => ({
-                ...prev,
-                progress: Math.round(progress * 100),
-              }))
+              setStatus((prev) => ({ ...prev, progress: Math.round(progress * 100) }))
             }
             ffmpeg.on('progress', progressHandler)
-
             try {
               await ffmpeg.exec([
-                '-i', inputName,
-                '-b:a', '128k',
-                '-ac', '1',
-                '-y',
-                `${prefix}compressed.mp3`,
+                '-i', inputName, '-b:a', '128k', '-ac', '1', '-y', `${prefix}compressed.mp3`,
               ])
             } finally {
               ffmpeg.off('progress', progressHandler)
@@ -352,46 +336,28 @@ export function useAudioProcessor() {
             if (isCancelled()) throw new Error('error.cancelled')
 
             const compressedRaw = await ffmpeg.readFile(`${prefix}compressed.mp3`) as Uint8Array
-            const compressedData = new Uint8Array(compressedRaw)
-            const compressedBlob = new Blob([compressedData], { type: 'audio/mpeg' })
+            const compressedBlob = new Blob([new Uint8Array(compressedRaw)], { type: 'audio/mpeg' })
 
             if (compressedBlob.size <= MAX_DIRECT_SIZE) {
               setStatus({ step: 'transcribing', detail: 'status.transcribing', progress: 0 })
               const result = await transcribeChunk(
                 new File([compressedBlob], 'audio.mp3', { type: 'audio/mpeg' }),
-                'audio.mp3',
-                options,
-                abortController.signal,
+                'audio.mp3', options, abortController.signal,
               )
               if (isCancelled()) throw new Error('error.cancelled')
               await cleanup(ffmpeg, trackedFiles)
-              if (isCancelled()) throw new Error('error.cancelled')
               setStatus({ step: 'done', detail: '', progress: 100 })
               return result
             }
 
+            splitSource = `${prefix}compressed.mp3`
             chunkExt = '.mp3'
             chunkMime = 'audio/mpeg'
-
-            // Recalculate segment duration based on compressed file
             const compressedBps = compressedBlob.size / Math.max(totalDuration, 1)
-            const compressedSegmentSeconds = Math.min(
+            effectiveSegmentSeconds = Math.min(
               maxSegmentSeconds,
-              Math.max(
-                MIN_SEGMENT_SECONDS,
-                Math.floor(TARGET_CHUNK_SIZE / compressedBps),
-              ),
+              Math.max(MIN_SEGMENT_SECONDS, Math.floor(TARGET_CHUNK_SIZE / compressedBps)),
             )
-
-            setStatus({ step: 'splitting', detail: 'status.splitting', progress: 0 })
-            await ffmpeg.exec([
-              '-i', `${prefix}compressed.mp3`,
-              '-f', 'segment',
-              '-segment_time', String(compressedSegmentSeconds),
-              '-c', 'copy',
-              '-y',
-              `${prefix}chunk_%03d.mp3`,
-            ])
           }
         } else {
           // Uncompressed audio (wav, flac, etc.): compress first
@@ -399,20 +365,12 @@ export function useAudioProcessor() {
 
           const progressHandler = ({ progress }: { progress: number }) => {
             if (isCancelled()) return
-            setStatus((prev) => ({
-              ...prev,
-              progress: Math.round(progress * 100),
-            }))
+            setStatus((prev) => ({ ...prev, progress: Math.round(progress * 100) }))
           }
           ffmpeg.on('progress', progressHandler)
-
           try {
             await ffmpeg.exec([
-              '-i', inputName,
-              '-b:a', '128k',
-              '-ac', '1',
-              '-y',
-              `${prefix}compressed.mp3`,
+              '-i', inputName, '-b:a', '128k', '-ac', '1', '-y', `${prefix}compressed.mp3`,
             ])
           } finally {
             ffmpeg.off('progress', progressHandler)
@@ -421,129 +379,103 @@ export function useAudioProcessor() {
 
           if (isCancelled()) throw new Error('error.cancelled')
 
-          // Check compressed size
           const compressedRaw = await ffmpeg.readFile(`${prefix}compressed.mp3`) as Uint8Array
-          const compressedData = new Uint8Array(compressedRaw)
-          const compressedBlob = new Blob([compressedData], { type: 'audio/mpeg' })
+          const compressedBlob = new Blob([new Uint8Array(compressedRaw)], { type: 'audio/mpeg' })
 
           if (compressedBlob.size <= MAX_DIRECT_SIZE) {
             setStatus({ step: 'transcribing', detail: 'status.transcribing', progress: 0 })
             const result = await transcribeChunk(
               new File([compressedBlob], 'audio.mp3', { type: 'audio/mpeg' }),
-              'audio.mp3',
-              options,
-              abortController.signal,
+              'audio.mp3', options, abortController.signal,
             )
             if (isCancelled()) throw new Error('error.cancelled')
             await cleanup(ffmpeg, trackedFiles)
-            if (isCancelled()) throw new Error('error.cancelled')
             setStatus({ step: 'done', detail: '', progress: 100 })
             return result
           }
 
-          // Still too large: split compressed file
+          splitSource = `${prefix}compressed.mp3`
           chunkExt = '.mp3'
           chunkMime = 'audio/mpeg'
-
-          // Recalculate segment duration based on compressed file
           const compressedBps = compressedBlob.size / Math.max(totalDuration, 1)
-          const compressedSegmentSeconds = Math.min(
+          effectiveSegmentSeconds = Math.min(
             maxSegmentSeconds,
-            Math.max(
-              MIN_SEGMENT_SECONDS,
-              Math.floor(TARGET_CHUNK_SIZE / compressedBps),
-            ),
+            Math.max(MIN_SEGMENT_SECONDS, Math.floor(TARGET_CHUNK_SIZE / compressedBps)),
           )
-
-          setStatus({ step: 'splitting', detail: 'status.splitting', progress: 0 })
-          await ffmpeg.exec([
-            '-i', `${prefix}compressed.mp3`,
-            '-f', 'segment',
-            '-segment_time', String(compressedSegmentSeconds),
-            '-c', 'copy',
-            '-y',
-            `${prefix}chunk_%03d.mp3`,
-          ])
         }
 
         if (isCancelled()) throw new Error('error.cancelled')
 
-        // Find chunk files
-        const chunkFiles: string[] = []
-        for (let i = 0; i < 999; i++) {
-          const name = `${prefix}chunk_${String(i).padStart(3, '0')}${chunkExt}`
-          try {
-            const data = await ffmpeg.readFile(name)
-            if (data instanceof Uint8Array && data.length > 0) {
-              chunkFiles.push(name)
-              trackedFiles.push(name)
-            } else {
-              break
-            }
-          } catch {
-            break
-          }
-        }
-
-        if (chunkFiles.length === 0) {
-          throw new Error('error.splitFailed')
-        }
-
-        // Get durations for each chunk and save chunk File objects
-        const chunkDurations: number[] = []
-        for (let i = 0; i < chunkFiles.length; i++) {
-          const dur = await getFileDuration(ffmpeg, chunkFiles[i])
-          chunkDurations.push(dur)
-
-          // Save chunk as File for retry
-          const chunkRaw = await ffmpeg.readFile(chunkFiles[i]) as Uint8Array
-          const chunkData = new Uint8Array(chunkRaw)
-          const chunkFilename = chunkFiles[i]
-          const chunkFile = new File(
-            [new Blob([chunkData], { type: chunkMime })],
-            chunkFilename,
-            { type: chunkMime },
-          )
-          chunkBlobsRef.current[i] = chunkFile
-        }
-        // Transcribe each chunk
-        setStatus({
-          step: 'transcribing',
-          detail: 'status.chunkProgress',
-          detailParams: { current: 0, total: chunkFiles.length },
-          progress: 0,
-        })
-
+        // Interleaved extract + transcribe: extract one chunk, transcribe it, repeat
+        const totalChunks = Math.ceil(totalDuration / effectiveSegmentSeconds)
         const results: string[] = []
+        const chunkDurations: number[] = []
         let prevText = options.prompt || ''
 
-        for (let i = 0; i < chunkFiles.length; i++) {
+        for (let i = 0; ; i++) {
           if (isCancelled()) throw new Error('error.cancelled')
+
+          const offset = i * effectiveSegmentSeconds
+          if (offset >= totalDuration) break
 
           setStatus({
             step: 'transcribing',
             detail: 'status.chunkProgress',
-            detailParams: { current: i + 1, total: chunkFiles.length },
-            progress: Math.round(((i) / chunkFiles.length) * 100),
+            detailParams: { current: i + 1, total: totalChunks },
+            progress: Math.round((i / totalChunks) * 100),
           })
 
-          const chunkFile = chunkBlobsRef.current[i]
+          // Extract single chunk (frame-level precision is sufficient for transcription)
+          const chunkName = `${prefix}chunk_${String(i).padStart(3, '0')}${chunkExt}`
+          trackedFiles.push(chunkName)
 
+          let chunkData: Uint8Array<ArrayBuffer>
+          try {
+            await ffmpeg.exec([
+              '-i', splitSource,
+              '-ss', String(offset),
+              '-t', String(effectiveSegmentSeconds),
+              '-c', 'copy',
+              '-y',
+              chunkName,
+            ])
+            const chunkRaw = await ffmpeg.readFile(chunkName) as Uint8Array
+            chunkData = new Uint8Array(chunkRaw) as Uint8Array<ArrayBuffer>
+            if (chunkData.length === 0) break
+          } catch {
+            // Extraction failed — only treat as EOF near the expected end of file
+            const isNearEnd = offset + effectiveSegmentSeconds >= totalDuration
+            if (results.length > 0 && isNearEnd) break
+            throw new Error('error.splitFailed')
+          }
+
+          const dur = await getFileDuration(ffmpeg, chunkName)
+          chunkDurations.push(dur)
+
+          // Save as File for retry
+          let chunkFile = new File(
+            [new Blob([chunkData], { type: chunkMime })],
+            chunkName,
+            { type: chunkMime },
+          )
+          chunkBlobsRef.current[i] = chunkFile
+
+          // Free ffmpeg memory
+          try { await ffmpeg.deleteFile(chunkName) } catch { /* ignore */ }
+
+          // Handle oversize chunk (rare: high-bitrate compressed audio)
           let chunkBlob: Blob = chunkFile
           let chunkFilename = chunkFile.name
 
           if (chunkFile.size > MAX_DIRECT_SIZE) {
-            // Rare: chunk exceeds 25MB (high-bitrate compressed audio)
             const tmpIn = `${prefix}oversize_in${chunkExt}`
             const tmpOut = `${prefix}oversize_out.mp3`
-            trackedFiles.push(tmpIn, tmpOut)
             try {
               await ffmpeg.writeFile(tmpIn, await fetchFile(chunkFile))
               await ffmpeg.exec(['-i', tmpIn, '-b:a', '128k', '-ac', '1', '-y', tmpOut])
               const recompressed = await ffmpeg.readFile(tmpOut) as Uint8Array
               chunkBlob = new Blob([new Uint8Array(recompressed)], { type: 'audio/mpeg' })
               chunkFilename = `chunk_${i}.mp3`
-              // Update stored blob for retry
               chunkBlobsRef.current[i] = new File([chunkBlob], chunkFilename, { type: 'audio/mpeg' })
             } finally {
               try { await ffmpeg.deleteFile(tmpIn) } catch { /* ignore */ }
@@ -551,8 +483,8 @@ export function useAudioProcessor() {
             }
           }
 
+          // Transcribe with retry
           const fileToSend = new File([chunkBlob], chunkFilename, { type: chunkBlob.type })
-
           let result: string | null = null
           for (let retry = 0; retry <= MAX_RETRIES; retry++) {
             try {
@@ -571,19 +503,19 @@ export function useAudioProcessor() {
           results.push(result!)
           prevText = extractLastChars(result!, options.responseFormat, 200)
 
-          // Save chunk result
           updateChunkResults((prev) => [
             ...prev,
             {
               index: i,
               text: result!,
-              duration: chunkDurations[i],
+              duration: dur,
               status: 'done' as const,
             },
           ])
         }
 
-        // Merge results
+        if (results.length === 0) throw new Error('error.splitFailed')
+
         const merged = mergeResults(results, chunkDurations, options.responseFormat)
 
         if (isCancelled()) throw new Error('error.cancelled')
