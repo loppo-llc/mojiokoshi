@@ -8,7 +8,7 @@ import { mergeResults } from '../lib/subtitle-merger'
 
 const MAX_DIRECT_SIZE = 25 * 1024 * 1024 // 25MB
 const MIN_SEGMENT_SECONDS = 60 // absolute minimum to avoid tiny chunks
-const MAX_SEGMENT_SECONDS = 1400 // Whisper API max duration limit
+const MAX_SEGMENT_SECONDS = 1390 // Whisper API max ~1400s, with margin for -c copy frame rounding
 const TARGET_CHUNK_SIZE = 24 * 1024 * 1024 // 24MB (leave 1MB margin under 25MB limit)
 const MAX_RETRIES = 2
 
@@ -258,7 +258,7 @@ export function useAudioProcessor() {
           const durationMatch = msg.match(/duration\s+[\d.]+\s+seconds\s+is\s+longer\s+than\s+([\d.]+)\s+seconds/i)
           if (durationMatch) {
             // Extract model-specific max duration and fall through to ffmpeg split path
-            maxSegmentSeconds = Math.max(MIN_SEGMENT_SECONDS, Math.floor(parseFloat(durationMatch[1])))
+            maxSegmentSeconds = Math.max(MIN_SEGMENT_SECONDS, Math.floor(parseFloat(durationMatch[1])) - 10)
           } else {
             setStatus({ step: 'error', detail: msg || 'error.generic', progress: 0 })
             throw err
