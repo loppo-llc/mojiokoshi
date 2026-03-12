@@ -499,44 +499,55 @@ export function useAudioProcessor() {
           let result: string | null = null
           let tokenLimitHit = false
           let chunkFailed = false
-          for (let retry = 0; retry <= MAX_RETRIES; retry++) {
-            try {
-              result = await transcribeChunk(fileToSend, chunkFilename, {
-                ...options,
-                prompt: prevText,
-              }, abortController.signal)
-              break
-            } catch (err) {
-              if (isCancelled()) throw new Error('error.cancelled')
-              const errMsg = err instanceof Error ? err.message : ''
-              if (/tokens.*too large|too large.*tokens/i.test(errMsg)) {
-                tokenLimitHit = true
+          try {
+            for (let retry = 0; retry <= MAX_RETRIES; retry++) {
+              try {
+                result = await transcribeChunk(fileToSend, chunkFilename, {
+                  ...options,
+                  prompt: prevText,
+                }, abortController.signal)
                 break
-              }
-              // Re-encode corrupted chunk and retry (once)
-              if (/corrupted|unsupported/i.test(errMsg) && retry === 0) {
-                const tmpIn = `${prefix}reencode_in${chunkExt}`
-                const tmpOut = `${prefix}reencode_out.mp3`
-                try {
-                  await ffmpeg.writeFile(tmpIn, await fetchFile(chunkBlob))
-                  await ffmpeg.exec(['-i', tmpIn, '-b:a', '128k', '-ac', '1', '-y', tmpOut])
-                  const reencoded = await ffmpeg.readFile(tmpOut) as Uint8Array
-                  chunkBlob = new Blob([new Uint8Array(reencoded)], { type: 'audio/mpeg' })
-                  chunkFilename = `chunk_${chunkIndex}.mp3`
-                  fileToSend = new File([chunkBlob], chunkFilename, { type: 'audio/mpeg' })
-                  chunkBlobsRef.current[chunkIndex] = new File([chunkBlob], chunkFilename, { type: 'audio/mpeg' })
-                } finally {
-                  try { await ffmpeg.deleteFile(tmpIn) } catch { /* ignore */ }
-                  try { await ffmpeg.deleteFile(tmpOut) } catch { /* ignore */ }
+              } catch (err) {
+                if (isCancelled()) throw new Error('error.cancelled')
+                const errMsg = err instanceof Error ? err.message : ''
+                if (/tokens.*too large|too large.*tokens/i.test(errMsg)) {
+                  tokenLimitHit = true
+                  break
                 }
-                continue
+                // Re-encode corrupted chunk and retry (once)
+                if (/corrupted|unsupported/i.test(errMsg) && retry === 0) {
+                  const tmpIn = `${prefix}reencode_in${chunkExt}`
+                  const tmpOut = `${prefix}reencode_out.mp3`
+                  try {
+                    await ffmpeg.writeFile(tmpIn, await fetchFile(chunkBlob))
+                    await ffmpeg.exec(['-i', tmpIn, '-b:a', '128k', '-ac', '1', '-y', tmpOut])
+                    const reencoded = await ffmpeg.readFile(tmpOut) as Uint8Array
+                    chunkBlob = new Blob([new Uint8Array(reencoded)], { type: 'audio/mpeg' })
+                    chunkFilename = `chunk_${chunkIndex}.mp3`
+                    fileToSend = new File([chunkBlob], chunkFilename, { type: 'audio/mpeg' })
+                    chunkBlobsRef.current[chunkIndex] = new File([chunkBlob], chunkFilename, { type: 'audio/mpeg' })
+                  } catch {
+                    // Re-encode failed — mark chunk as failed (but propagate cancel)
+                    if (isCancelled()) throw new Error('error.cancelled')
+                    chunkFailed = true
+                    break
+                  } finally {
+                    try { await ffmpeg.deleteFile(tmpIn) } catch { /* ignore */ }
+                    try { await ffmpeg.deleteFile(tmpOut) } catch { /* ignore */ }
+                  }
+                  continue
+                }
+                if (retry === MAX_RETRIES) {
+                  chunkFailed = true
+                  break
+                }
+                await new Promise((r) => setTimeout(r, 1000 * (retry + 1)))
               }
-              if (retry === MAX_RETRIES) {
-                chunkFailed = true
-                break
-              }
-              await new Promise((r) => setTimeout(r, 1000 * (retry + 1)))
             }
+          } catch (err) {
+            // Catch any unexpected error in retry loop — record as failed chunk instead of killing everything
+            if (isCancelled()) throw new Error('error.cancelled')
+            chunkFailed = true
           }
 
           if (tokenLimitHit) {
