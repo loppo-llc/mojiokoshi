@@ -8,6 +8,7 @@ import { mergeResults } from '../lib/subtitle-merger'
 
 const MAX_DIRECT_SIZE = 25 * 1024 * 1024 // 25MB
 const MIN_SEGMENT_SECONDS = 60 // absolute minimum to avoid tiny chunks
+const MAX_SEGMENT_SECONDS = 1400 // Whisper API max duration limit
 const TARGET_CHUNK_SIZE = 24 * 1024 * 1024 // 24MB (leave 1MB margin under 25MB limit)
 const MAX_RETRIES = 2
 
@@ -240,8 +241,9 @@ export function useAudioProcessor() {
       jobOptionsRef.current = options
 
       const isCancelled = () => jobIdRef.current !== currentJobId || abortController.signal.aborted
+      let maxSegmentSeconds = MAX_SEGMENT_SECONDS
 
-      // Small file: direct transcribe
+      // Small file: try direct transcribe, fall through to split if duration exceeded
       if (file.size <= MAX_DIRECT_SIZE) {
         setStatus({ step: 'transcribing', detail: 'status.transcribing', progress: 0 })
         try {
@@ -251,9 +253,16 @@ export function useAudioProcessor() {
           return result
         } catch (err) {
           if (isCancelled()) throw new Error('error.cancelled')
-          const msg = err instanceof Error ? err.message : 'error.generic'
-          setStatus({ step: 'error', detail: msg, progress: 0 })
-          throw err
+          const msg = err instanceof Error ? err.message : ''
+          // Detect duration-exceeded error: "audio duration X seconds is longer than Y seconds ..."
+          const durationMatch = msg.match(/duration\s+[\d.]+\s+seconds\s+is\s+longer\s+than\s+([\d.]+)\s+seconds/i)
+          if (durationMatch) {
+            // Extract model-specific max duration and fall through to ffmpeg split path
+            maxSegmentSeconds = Math.max(MIN_SEGMENT_SECONDS, Math.floor(parseFloat(durationMatch[1])))
+          } else {
+            setStatus({ step: 'error', detail: msg || 'error.generic', progress: 0 })
+            throw err
+          }
         }
       }
 
@@ -277,9 +286,12 @@ export function useAudioProcessor() {
         // Calculate optimal segment duration based on file size and duration
         const totalDuration = await getFileDuration(ffmpeg, inputName)
         const bytesPerSecond = file.size / Math.max(totalDuration, 1)
-        const segmentSeconds = Math.max(
-          MIN_SEGMENT_SECONDS,
-          Math.floor(TARGET_CHUNK_SIZE / bytesPerSecond),
+        const segmentSeconds = Math.min(
+          maxSegmentSeconds,
+          Math.max(
+            MIN_SEGMENT_SECONDS,
+            Math.floor(TARGET_CHUNK_SIZE / bytesPerSecond),
+          ),
         )
 
         let chunkExt = '.mp3'
@@ -363,9 +375,12 @@ export function useAudioProcessor() {
 
             // Recalculate segment duration based on compressed file
             const compressedBps = compressedBlob.size / Math.max(totalDuration, 1)
-            const compressedSegmentSeconds = Math.max(
-              MIN_SEGMENT_SECONDS,
-              Math.floor(TARGET_CHUNK_SIZE / compressedBps),
+            const compressedSegmentSeconds = Math.min(
+              maxSegmentSeconds,
+              Math.max(
+                MIN_SEGMENT_SECONDS,
+                Math.floor(TARGET_CHUNK_SIZE / compressedBps),
+              ),
             )
 
             setStatus({ step: 'splitting', detail: 'status.splitting', progress: 0 })
@@ -432,9 +447,12 @@ export function useAudioProcessor() {
 
           // Recalculate segment duration based on compressed file
           const compressedBps = compressedBlob.size / Math.max(totalDuration, 1)
-          const compressedSegmentSeconds = Math.max(
-            MIN_SEGMENT_SECONDS,
-            Math.floor(TARGET_CHUNK_SIZE / compressedBps),
+          const compressedSegmentSeconds = Math.min(
+            maxSegmentSeconds,
+            Math.max(
+              MIN_SEGMENT_SECONDS,
+              Math.floor(TARGET_CHUNK_SIZE / compressedBps),
+            ),
           )
 
           setStatus({ step: 'splitting', detail: 'status.splitting', progress: 0 })
