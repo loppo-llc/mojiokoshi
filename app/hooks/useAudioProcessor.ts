@@ -7,7 +7,8 @@ import type { ProcessingStatus, TranscribeOptions, ChunkResult } from '../lib/ty
 import { mergeResults } from '../lib/subtitle-merger'
 
 const MAX_DIRECT_SIZE = 25 * 1024 * 1024 // 25MB
-const SEGMENT_SECONDS = 600 // 10 minutes
+const MIN_SEGMENT_SECONDS = 60 // absolute minimum to avoid tiny chunks
+const TARGET_CHUNK_SIZE = 24 * 1024 * 1024 // 24MB (leave 1MB margin under 25MB limit)
 const MAX_RETRIES = 2
 
 const COMPRESSED_EXTENSIONS = new Set(['mp3', 'm4a', 'aac', 'ogg', 'webm', 'mp4', 'opus', 'mpeg', 'mpga'])
@@ -164,7 +165,7 @@ export function useAudioProcessor() {
         parseInt(match[4]) / 100
       )
     }
-    return SEGMENT_SECONDS // fallback
+    return 600 // fallback: assume 10 minutes if duration detection fails
   }, [])
 
   const retryChunk = useCallback(
@@ -273,6 +274,14 @@ export function useAudioProcessor() {
 
         if (isCancelled()) throw new Error('error.cancelled')
 
+        // Calculate optimal segment duration based on file size and duration
+        const totalDuration = await getFileDuration(ffmpeg, inputName)
+        const bytesPerSecond = file.size / Math.max(totalDuration, 1)
+        const segmentSeconds = Math.max(
+          MIN_SEGMENT_SECONDS,
+          Math.floor(TARGET_CHUNK_SIZE / bytesPerSecond),
+        )
+
         let chunkExt = '.mp3'
         let chunkMime = 'audio/mpeg'
 
@@ -284,7 +293,7 @@ export function useAudioProcessor() {
             await ffmpeg.exec([
               '-i', inputName,
               '-f', 'segment',
-              '-segment_time', String(SEGMENT_SECONDS),
+              '-segment_time', String(segmentSeconds),
               '-c', 'copy',
               '-y',
               `${prefix}chunk_%03d${ext}`,
@@ -352,11 +361,18 @@ export function useAudioProcessor() {
             chunkExt = '.mp3'
             chunkMime = 'audio/mpeg'
 
+            // Recalculate segment duration based on compressed file
+            const compressedBps = compressedBlob.size / Math.max(totalDuration, 1)
+            const compressedSegmentSeconds = Math.max(
+              MIN_SEGMENT_SECONDS,
+              Math.floor(TARGET_CHUNK_SIZE / compressedBps),
+            )
+
             setStatus({ step: 'splitting', detail: 'status.splitting', progress: 0 })
             await ffmpeg.exec([
               '-i', `${prefix}compressed.mp3`,
               '-f', 'segment',
-              '-segment_time', String(SEGMENT_SECONDS),
+              '-segment_time', String(compressedSegmentSeconds),
               '-c', 'copy',
               '-y',
               `${prefix}chunk_%03d.mp3`,
@@ -414,11 +430,18 @@ export function useAudioProcessor() {
           chunkExt = '.mp3'
           chunkMime = 'audio/mpeg'
 
+          // Recalculate segment duration based on compressed file
+          const compressedBps = compressedBlob.size / Math.max(totalDuration, 1)
+          const compressedSegmentSeconds = Math.max(
+            MIN_SEGMENT_SECONDS,
+            Math.floor(TARGET_CHUNK_SIZE / compressedBps),
+          )
+
           setStatus({ step: 'splitting', detail: 'status.splitting', progress: 0 })
           await ffmpeg.exec([
             '-i', `${prefix}compressed.mp3`,
             '-f', 'segment',
-            '-segment_time', String(SEGMENT_SECONDS),
+            '-segment_time', String(compressedSegmentSeconds),
             '-c', 'copy',
             '-y',
             `${prefix}chunk_%03d.mp3`,
