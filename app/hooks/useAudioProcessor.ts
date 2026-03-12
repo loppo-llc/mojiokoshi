@@ -445,9 +445,8 @@ export function useAudioProcessor() {
             chunkData = new Uint8Array(chunkRaw) as Uint8Array<ArrayBuffer>
             if (chunkData.length === 0) break
           } catch {
-            // Extraction failed — only treat as EOF near the expected end of file
-            const isNearEnd = offset + effectiveSegmentSeconds >= totalDuration
-            if (results.length > 0 && isNearEnd) break
+            // Extraction failed — return partial results if any, otherwise fail
+            if (results.length > 0) break
             throw new Error('error.splitFailed')
           }
 
@@ -488,6 +487,7 @@ export function useAudioProcessor() {
           let fileToSend = new File([chunkBlob], chunkFilename, { type: chunkBlob.type })
           let result: string | null = null
           let tokenLimitHit = false
+          let chunkFailed = false
           for (let retry = 0; retry <= MAX_RETRIES; retry++) {
             try {
               result = await transcribeChunk(fileToSend, chunkFilename, {
@@ -520,15 +520,27 @@ export function useAudioProcessor() {
                 }
                 continue
               }
-              if (retry === MAX_RETRIES) throw err
+              if (retry === MAX_RETRIES) {
+                // If we have partial results, stop gracefully instead of failing entirely
+                if (results.length > 0) {
+                  chunkFailed = true
+                  break
+                }
+                throw err
+              }
               await new Promise((r) => setTimeout(r, 1000 * (retry + 1)))
             }
           }
+
+          // Stop processing on unrecoverable chunk failure (partial results preserved)
+          if (chunkFailed) break
 
           if (tokenLimitHit) {
             // Halve segment duration and re-extract from same offset
             const halved = Math.floor(effectiveSegmentSeconds / 2)
             if (halved < MIN_SEGMENT_SECONDS) {
+              // If we have partial results, return them instead of failing
+              if (results.length > 0) break
               throw new Error('error.chunkTooLarge')
             }
             effectiveSegmentSeconds = halved
@@ -547,7 +559,7 @@ export function useAudioProcessor() {
             {
               index: chunkIndex,
               text: result!,
-              duration: dur,
+              duration: advancement,
               status: 'done' as const,
             },
           ])
