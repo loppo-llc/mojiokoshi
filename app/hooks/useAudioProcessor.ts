@@ -484,8 +484,8 @@ export function useAudioProcessor() {
             }
           }
 
-          // Transcribe with retry (token-too-large triggers segment reduction)
-          const fileToSend = new File([chunkBlob], chunkFilename, { type: chunkBlob.type })
+          // Transcribe with retry (handles token-too-large and corrupted chunk errors)
+          let fileToSend = new File([chunkBlob], chunkFilename, { type: chunkBlob.type })
           let result: string | null = null
           let tokenLimitHit = false
           for (let retry = 0; retry <= MAX_RETRIES; retry++) {
@@ -501,6 +501,24 @@ export function useAudioProcessor() {
               if (/tokens.*too large|too large.*tokens/i.test(errMsg)) {
                 tokenLimitHit = true
                 break
+              }
+              // Re-encode corrupted chunk and retry (once)
+              if (/corrupted|unsupported/i.test(errMsg) && retry === 0) {
+                const tmpIn = `${prefix}reencode_in${chunkExt}`
+                const tmpOut = `${prefix}reencode_out.mp3`
+                try {
+                  await ffmpeg.writeFile(tmpIn, await fetchFile(chunkBlob))
+                  await ffmpeg.exec(['-i', tmpIn, '-b:a', '128k', '-ac', '1', '-y', tmpOut])
+                  const reencoded = await ffmpeg.readFile(tmpOut) as Uint8Array
+                  chunkBlob = new Blob([new Uint8Array(reencoded)], { type: 'audio/mpeg' })
+                  chunkFilename = `chunk_${chunkIndex}.mp3`
+                  fileToSend = new File([chunkBlob], chunkFilename, { type: 'audio/mpeg' })
+                  chunkBlobsRef.current[chunkIndex] = new File([chunkBlob], chunkFilename, { type: 'audio/mpeg' })
+                } finally {
+                  try { await ffmpeg.deleteFile(tmpIn) } catch { /* ignore */ }
+                  try { await ffmpeg.deleteFile(tmpOut) } catch { /* ignore */ }
+                }
+                continue
               }
               if (retry === MAX_RETRIES) throw err
               await new Promise((r) => setTimeout(r, 1000 * (retry + 1)))
