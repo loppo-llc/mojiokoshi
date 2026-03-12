@@ -40,6 +40,13 @@ const ACCEPTED_EXTENSIONS = ['.mp3', '.mp4', '.mpeg', '.mpga', '.m4a', '.wav', '
 
 const TERMS_LINK_URL = 'https://openai.com/policies/terms-of-use'
 
+function formatTime(seconds: number) {
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  const s = Math.floor(seconds % 60)
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`
+}
+
 function formatFileSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
@@ -524,6 +531,9 @@ export default function Home() {
                           <div className="flex items-center justify-between mb-2">
                             <span className="text-xs text-text-secondary font-mono">
                               {t('chunk.label', { current: arrayIndex + 1, total: chunkResults.length })}
+                              <span className="ml-2 text-text-tertiary">
+                                {formatTime(chunk.startTime)}–{formatTime(chunk.endTime)}
+                              </span>
                             </span>
                             {chunk.status === 'retrying' || retryingIndex === chunk.index ? (
                               <span className="flex items-center gap-1.5 text-xs text-accent font-mono">

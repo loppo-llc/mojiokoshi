@@ -163,7 +163,7 @@ export function useAudioProcessor() {
         parseInt(match[1]) * 3600 +
         parseInt(match[2]) * 60 +
         parseInt(match[3]) +
-        parseInt(match[4]) / 100
+        parseInt(match[4]) / Math.pow(10, match[4].length)
       )
     }
     return 600 // fallback: assume 10 minutes if duration detection fails
@@ -186,12 +186,16 @@ export function useAudioProcessor() {
         prev.map((c) => (c.index === index ? { ...c, status: 'retrying' as const } : c)),
       )
 
+      // Save original status to restore on failure
+      const origStatus = chunkResultsRef.current.find((c) => c.index === index)?.status || 'done'
+
       try {
-        // Build prompt from previous chunk
+        // Build prompt from previous chunk (find by index, not array position)
         let prompt = initialPromptRef.current
         const currentResults = chunkResultsRef.current
-        if (index > 0 && currentResults[index - 1]) {
-          prompt = extractLastChars(currentResults[index - 1].text, opts.responseFormat, 200)
+        const prevChunk = currentResults.find((c) => c.index === index - 1)
+        if (prevChunk && prevChunk.text) {
+          prompt = extractLastChars(prevChunk.text, opts.responseFormat, 200)
         }
 
         const result = await transcribeChunk(chunkFile, chunkFile.name, {
@@ -202,25 +206,24 @@ export function useAudioProcessor() {
         // Check if job changed during retry
         if (jobIdRef.current !== retryJobId) throw new Error('error.cancelled')
 
-        // Update chunk result
-        updateChunkResults((prev) =>
-          prev.map((c) =>
-            c.index === index ? { ...c, text: result, status: 'done' as const } : c,
-          ),
-        )
-
-        // Re-merge all results
-        const updatedResults = chunkResultsRef.current.map((c) =>
-          c.index === index ? { ...c, text: result } : c,
-        )
-        const texts = updatedResults.map((c) => c.text)
-        const durations = updatedResults.map((c) => c.duration)
-        return mergeResults(texts, durations, opts.responseFormat)
+        // Update chunk result and re-merge using updater return value
+        let merged = ''
+        updateChunkResults((prev) => {
+          const next = prev.map((c) =>
+            c.index === index ? { ...c, text: result, status: 'done' as const, error: undefined } : c,
+          )
+          chunkResultsRef.current = next
+          const texts = next.map((c) => c.text)
+          const durations = next.map((c) => c.duration)
+          merged = mergeResults(texts, durations, opts.responseFormat)
+          return next
+        })
+        return merged
       } catch (err) {
-        // Revert status to done on failure (only if same job)
+        // Revert to original status on failure (only if same job)
         if (jobIdRef.current === retryJobId) {
           updateChunkResults((prev) =>
-            prev.map((c) => (c.index === index ? { ...c, status: 'done' as const } : c)),
+            prev.map((c) => (c.index === index ? { ...c, status: origStatus } : c)),
           )
         }
         throw err
@@ -429,6 +432,7 @@ export function useAudioProcessor() {
           })
 
           // Extract single chunk (frame-level precision is sufficient for transcription)
+          const segmentAtExtraction = effectiveSegmentSeconds
           const chunkName = `${prefix}chunk_${String(chunkIndex).padStart(3, '0')}${chunkExt}`
           trackedFiles.push(chunkName)
 
@@ -542,15 +546,17 @@ export function useAudioProcessor() {
               chunkFailed = true
             } else {
               effectiveSegmentSeconds = halved
+              delete chunkBlobsRef.current[chunkIndex]
               continue
             }
           }
 
           // Advance offset by actual chunk duration (fall back to segment time if detection failed)
-          const advancement = (dur > 0 && dur < effectiveSegmentSeconds * 2) ? dur : effectiveSegmentSeconds
+          const advancement = (dur > 0 && dur < segmentAtExtraction * 2) ? dur : segmentAtExtraction
 
           if (chunkFailed) {
             // Record failed chunk and continue to next
+            const chunkStart = offset
             chunkDurations.push(advancement)
             results.push('')
             offset += advancement
@@ -561,6 +567,8 @@ export function useAudioProcessor() {
                 index: chunkIndex,
                 text: '',
                 duration: advancement,
+                startTime: chunkStart,
+                endTime: offset,
                 status: 'error' as const,
                 error: 'error.chunkFailed',
               },
@@ -569,6 +577,7 @@ export function useAudioProcessor() {
             continue
           }
 
+          const chunkStart = offset
           chunkDurations.push(advancement)
           results.push(result!)
           prevText = extractLastChars(result!, options.responseFormat, 200)
@@ -580,6 +589,8 @@ export function useAudioProcessor() {
               index: chunkIndex,
               text: result!,
               duration: advancement,
+              startTime: chunkStart,
+              endTime: offset,
               status: 'done' as const,
             },
           ])

@@ -26,6 +26,8 @@ export interface ChunkResult {
   index: number
   text: string
   duration: number
+  startTime: number
+  endTime: number
   status: 'done' | 'retrying' | 'error'
   error?: string
 }
