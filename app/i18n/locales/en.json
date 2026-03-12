@@ -40,6 +40,7 @@
   "error.cancelled": "Cancelled",
   "error.splitFailed": "Failed to split audio",
   "error.chunkTooLarge": "Audio chunk too large for this model even at minimum segment size",
+  "error.chunkFailed": "Failed to transcribe this chunk",
   "error.noOptions": "Processing options not found",
   "error.noChunkData": "Chunk data not found",
   "terms.title": "Terms of Use",

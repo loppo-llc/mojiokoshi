@@ -40,6 +40,7 @@
   "error.cancelled": "Annulé",
   "error.splitFailed": "Échec du découpage audio",
   "error.chunkTooLarge": "Le segment audio est trop volumineux pour ce modèle, même à la taille minimale",
+  "error.chunkFailed": "Échec de la transcription de ce segment",
   "error.noOptions": "Options de traitement introuvables",
   "error.noChunkData": "Données du segment introuvables",
   "terms.title": "Conditions d'utilisation",

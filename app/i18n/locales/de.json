@@ -40,6 +40,7 @@
   "error.cancelled": "Abgebrochen",
   "error.splitFailed": "Audio-Aufteilung fehlgeschlagen",
   "error.chunkTooLarge": "Audio-Segment ist selbst bei Mindestgröße zu groß für dieses Modell",
+  "error.chunkFailed": "Transkription dieses Segments fehlgeschlagen",
   "error.noOptions": "Verarbeitungsoptionen nicht gefunden",
   "error.noChunkData": "Chunk-Daten nicht gefunden",
   "terms.title": "Nutzungsbedingungen",

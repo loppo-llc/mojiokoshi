@@ -537,16 +537,22 @@ export default function Home() {
                               <button
                                 onClick={() => handleRetryChunk(chunk.index)}
                                 disabled={retryingIndex !== null}
-                                className="text-xs text-text-tertiary hover:text-accent transition-colors font-mono disabled:opacity-30 disabled:cursor-not-allowed"
+                                className={`text-xs transition-colors font-mono disabled:opacity-30 disabled:cursor-not-allowed ${chunk.status === 'error' ? 'text-red-400 hover:text-red-300' : 'text-text-tertiary hover:text-accent'}`}
                               >
                                 {t('chunk.retry')}
                               </button>
                             )}
                           </div>
                           <div className="max-h-40 overflow-y-auto">
-                            <pre className="font-mono text-xs text-text-primary/70 whitespace-pre-wrap leading-relaxed break-words">
-                              {chunk.text}
-                            </pre>
+                            {chunk.status === 'error' ? (
+                              <p className="font-mono text-xs text-red-400/70">
+                                {t(chunk.error || 'error.chunkFailed')}
+                              </p>
+                            ) : (
+                              <pre className="font-mono text-xs text-text-primary/70 whitespace-pre-wrap leading-relaxed break-words">
+                                {chunk.text}
+                              </pre>
+                            )}
                           </div>
                         </div>
                       ))}

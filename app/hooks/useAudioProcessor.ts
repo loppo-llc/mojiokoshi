@@ -528,34 +528,47 @@ export function useAudioProcessor() {
                 continue
               }
               if (retry === MAX_RETRIES) {
-                // If we have partial results, stop gracefully instead of failing entirely
-                if (results.length > 0) {
-                  chunkFailed = true
-                  break
-                }
-                throw err
+                chunkFailed = true
+                break
               }
               await new Promise((r) => setTimeout(r, 1000 * (retry + 1)))
             }
           }
 
-          // Stop processing on unrecoverable chunk failure (partial results preserved)
-          if (chunkFailed) break
-
           if (tokenLimitHit) {
             // Halve segment duration and re-extract from same offset
             const halved = Math.floor(effectiveSegmentSeconds / 2)
             if (halved < MIN_SEGMENT_SECONDS) {
-              // If we have partial results, return them instead of failing
-              if (results.length > 0) break
-              throw new Error('error.chunkTooLarge')
+              chunkFailed = true
+            } else {
+              effectiveSegmentSeconds = halved
+              continue
             }
-            effectiveSegmentSeconds = halved
-            continue
           }
 
           // Advance offset by actual chunk duration (fall back to segment time if detection failed)
           const advancement = (dur > 0 && dur < effectiveSegmentSeconds * 2) ? dur : effectiveSegmentSeconds
+
+          if (chunkFailed) {
+            // Record failed chunk and continue to next
+            chunkDurations.push(advancement)
+            results.push('')
+            offset += advancement
+
+            updateChunkResults((prev) => [
+              ...prev,
+              {
+                index: chunkIndex,
+                text: '',
+                duration: advancement,
+                status: 'error' as const,
+                error: 'error.chunkFailed',
+              },
+            ])
+            chunkIndex++
+            continue
+          }
+
           chunkDurations.push(advancement)
           results.push(result!)
           prevText = extractLastChars(result!, options.responseFormat, 200)

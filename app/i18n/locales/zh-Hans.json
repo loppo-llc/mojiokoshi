@@ -40,6 +40,7 @@
   "error.cancelled": "已取消",
   "error.splitFailed": "音频分割失败",
   "error.chunkTooLarge": "即使最小分段也超出此模型的令牌限制",
+  "error.chunkFailed": "此分段转录失败",
   "error.noOptions": "未找到处理选项",
   "error.noChunkData": "未找到分块数据",
   "terms.title": "使用条款",
