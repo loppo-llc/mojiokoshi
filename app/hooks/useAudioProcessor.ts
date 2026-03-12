@@ -181,13 +181,13 @@ export function useAudioProcessor() {
       const abortController = new AbortController()
       abortRef.current = abortController
 
+      // Save original status before marking as retrying
+      const origStatus = chunkResultsRef.current.find((c) => c.index === index)?.status || 'done'
+
       // Mark as retrying
       updateChunkResults((prev) =>
         prev.map((c) => (c.index === index ? { ...c, status: 'retrying' as const } : c)),
       )
-
-      // Save original status to restore on failure
-      const origStatus = chunkResultsRef.current.find((c) => c.index === index)?.status || 'done'
 
       try {
         // Build prompt from previous chunk (find by index, not array position)
