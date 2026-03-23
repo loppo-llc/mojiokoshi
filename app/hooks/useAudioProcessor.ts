@@ -182,7 +182,8 @@ export function useAudioProcessor() {
       abortRef.current = abortController
 
       // Save original status before marking as retrying
-      const origStatus = chunkResultsRef.current.find((c) => c.index === index)?.status || 'done'
+      const origChunk = chunkResultsRef.current.find((c) => c.index === index)
+      const origStatus = origChunk?.status || 'error'
 
       // Mark as retrying
       updateChunkResults((prev) =>
@@ -206,16 +207,21 @@ export function useAudioProcessor() {
         // Check if job changed during retry
         if (jobIdRef.current !== retryJobId) throw new Error('error.cancelled')
 
-        // Update chunk result and re-merge using updater return value
+        // Update chunk result and re-merge. mergeResults runs inside the
+        // updater so it always sees the latest prev state. try-catch
+        // prevents a merge exception from crashing React's render phase.
         let merged = ''
         updateChunkResults((prev) => {
           const next = prev.map((c) =>
             c.index === index ? { ...c, text: result, status: 'done' as const, error: undefined } : c,
           )
-          chunkResultsRef.current = next
           const texts = next.map((c) => c.text)
           const durations = next.map((c) => c.duration)
-          merged = mergeResults(texts, durations, opts.responseFormat)
+          try {
+            merged = mergeResults(texts, durations, opts.responseFormat)
+          } catch {
+            merged = texts.join('\n')
+          }
           return next
         })
         return merged
