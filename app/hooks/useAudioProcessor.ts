@@ -157,7 +157,8 @@ export function useAudioProcessor() {
 
       const retryJobId = jobIdRef.current
       const abortController = new AbortController()
-      abortRef.current = abortController
+      // Don't overwrite abortRef — it belongs to the main job.
+      // Retry uses its own independent controller.
 
       // Save original status before marking as retrying
       const origChunk = chunkResultsRef.current.find((c) => c.index === index)
@@ -235,8 +236,9 @@ export function useAudioProcessor() {
           )
           const texts = next.map((c) => c.text)
           const durations = next.map((c) => c.duration)
+          const starts = next.map((c) => c.startTime)
           try {
-            merged = mergeResults(texts, durations, opts.responseFormat)
+            merged = mergeResults(texts, durations, opts.responseFormat, starts)
           } catch {
             merged = texts.join('\n')
           }
@@ -369,6 +371,7 @@ export function useAudioProcessor() {
         setStatus({ step: 'transcribing', detail: 'status.splitting', progress: 0 })
         const chunkPattern = `${prefix}chunk_%03d.mp3`
         const segListFile = `${prefix}segments.csv`
+        trackedFiles.push(segListFile)
         await ffmpeg.exec([
           '-i', compressedName,
           '-f', 'segment',
@@ -483,7 +486,8 @@ export function useAudioProcessor() {
 
         if (results.every((r) => r === '')) throw new Error('error.splitFailed')
 
-        const merged = mergeResults(results, chunkDurations, options.responseFormat)
+        const chunkStartTimes = chunks.map((c) => c.startTime)
+        const merged = mergeResults(results, chunkDurations, options.responseFormat, chunkStartTimes)
 
         if (isCancelled()) throw new Error('error.cancelled')
 
@@ -499,6 +503,8 @@ export function useAudioProcessor() {
         }
         // Normalize AbortError to cancel message
         if (isCancelled()) throw new Error('error.cancelled')
+        const errMsg = err instanceof Error ? err.message : 'error.generic'
+        setStatus({ step: 'error', detail: errMsg, progress: 0 })
         throw err
       }
     },

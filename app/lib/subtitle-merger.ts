@@ -7,9 +7,14 @@ export function mergeResults(
   results: string[],
   chunkDurations: number[],
   format: string,
+  startTimes?: number[],
 ): string {
   if (results.length === 0) return ''
   if (results.length === 1) return results[0]
+
+  // Use exact start times from segment list when available;
+  // fall back to cumulative durations for backwards compatibility.
+  const offsets = startTimes || cumulativeOffsets(chunkDurations)
 
   switch (format) {
     case 'text':
@@ -17,14 +22,22 @@ export function mergeResults(
     case 'json':
       return mergeJson(results)
     case 'verbose_json':
-      return mergeVerboseJson(results, chunkDurations)
+      return mergeVerboseJson(results, offsets)
     case 'srt':
-      return mergeSrt(results, chunkDurations)
+      return mergeSrt(results, offsets)
     case 'vtt':
-      return mergeVtt(results, chunkDurations)
+      return mergeVtt(results, offsets)
     default:
       return mergeText(results)
   }
+}
+
+function cumulativeOffsets(durations: number[]): number[] {
+  const offsets: number[] = [0]
+  for (let i = 0; i < durations.length - 1; i++) {
+    offsets.push(offsets[i] + (durations[i] || 0))
+  }
+  return offsets
 }
 
 function mergeText(results: string[]): string {
@@ -42,12 +55,12 @@ function mergeJson(results: string[]): string {
   return JSON.stringify({ text: texts.join('\n') }, null, 2)
 }
 
-function mergeVerboseJson(results: string[], chunkDurations: number[]): string {
+function mergeVerboseJson(results: string[], offsets: number[]): string {
   let fullText = ''
   const allSegments: unknown[] = []
-  let timeOffset = 0
 
   for (let i = 0; i < results.length; i++) {
+    const timeOffset = offsets[i] || 0
     try {
       const data = JSON.parse(results[i])
       fullText += (fullText ? '\n' : '') + (data.text || '')
@@ -64,18 +77,17 @@ function mergeVerboseJson(results: string[], chunkDurations: number[]): string {
     } catch {
       fullText += (fullText ? '\n' : '') + results[i]
     }
-    timeOffset += chunkDurations[i] || 0
   }
 
   return JSON.stringify({ text: fullText, segments: allSegments }, null, 2)
 }
 
-function mergeSrt(results: string[], chunkDurations: number[]): string {
+function mergeSrt(results: string[], offsets: number[]): string {
   let indexCounter = 1
-  let timeOffset = 0
   const blocks: string[] = []
 
   for (let i = 0; i < results.length; i++) {
+    const timeOffset = offsets[i] || 0
     const entries = parseSrtEntries(results[i])
     for (const entry of entries) {
       const start = offsetSrtTime(entry.start, timeOffset)
@@ -83,17 +95,16 @@ function mergeSrt(results: string[], chunkDurations: number[]): string {
       blocks.push(`${indexCounter}\n${start} --> ${end}\n${entry.text}`)
       indexCounter++
     }
-    timeOffset += chunkDurations[i] || 0
   }
 
   return blocks.join('\n\n') + '\n'
 }
 
-function mergeVtt(results: string[], chunkDurations: number[]): string {
-  let timeOffset = 0
+function mergeVtt(results: string[], offsets: number[]): string {
   const cues: string[] = []
 
   for (let i = 0; i < results.length; i++) {
+    const timeOffset = offsets[i] || 0
     const lines = results[i].split('\n')
     let inCue = false
     let cueLines: string[] = []
@@ -124,8 +135,6 @@ function mergeVtt(results: string[], chunkDurations: number[]): string {
     if (inCue && cueLines.length > 0) {
       cues.push(processCueLines(cueLines, timeOffset))
     }
-
-    timeOffset += chunkDurations[i] || 0
   }
 
   return 'WEBVTT\n\n' + cues.join('\n\n') + '\n'
