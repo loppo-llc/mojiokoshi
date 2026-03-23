@@ -275,6 +275,7 @@ export function useAudioProcessor() {
 
       const isCancelled = () => jobIdRef.current !== currentJobId || abortController.signal.aborted
       let maxSegmentSeconds = MAX_SEGMENT_SECONDS
+      let mustSplit = false // set when initial direct transcribe fails with token/duration limit
 
       // Small file: try direct transcribe, fall through to split if duration exceeded
       if (file.size <= MAX_DIRECT_SIZE) {
@@ -292,9 +293,11 @@ export function useAudioProcessor() {
           if (durationMatch) {
             // Extract model-specific max duration and fall through to ffmpeg split path
             maxSegmentSeconds = Math.max(MIN_SEGMENT_SECONDS, Math.floor(parseFloat(durationMatch[1])) - 10)
+            mustSplit = true
           } else if (/tokens.*too large|too large.*tokens/i.test(msg)) {
             // Token limit exceeded — fall through to ffmpeg split path with reduced segment
             maxSegmentSeconds = Math.min(maxSegmentSeconds, 600)
+            mustSplit = true
           } else {
             setStatus({ step: 'error', detail: msg || 'error.generic', progress: 0 })
             throw err
@@ -331,10 +334,15 @@ export function useAudioProcessor() {
           Math.max(MIN_SEGMENT_SECONDS, Math.floor(TARGET_CHUNK_SIZE / OUTPUT_BPS)),
         )
 
-        // For uncompressed audio, pre-compress to MP3 first — reduces
-        // ffmpeg decode overhead per chunk and enables the "fits in 25MB" shortcut.
-        if (!isCompressedAudio(file.name)) {
-          setStatus({ step: 'compressing', detail: 'status.compressing', progress: 0 })
+        // Pre-compress to MP3 — ensures consistent decode behaviour for
+        // chunk extraction (output seeking decodes from start each time,
+        // so a lightweight source format matters) and enables the
+        // "fits in 25MB" shortcut.
+        {
+          const statusKey = isCompressedAudio(file.name)
+            ? 'status.compressingFallback'
+            : 'status.compressing'
+          setStatus({ step: 'compressing', detail: statusKey, progress: 0 })
 
           const progressHandler = ({ progress }: { progress: number }) => {
             if (isCancelled()) return
@@ -355,7 +363,7 @@ export function useAudioProcessor() {
           const compressedRaw = await ffmpeg.readFile(`${prefix}compressed.mp3`) as Uint8Array
           const compressedBlob = new Blob([new Uint8Array(compressedRaw)], { type: 'audio/mpeg' })
 
-          if (compressedBlob.size <= MAX_DIRECT_SIZE && totalDuration <= maxSegmentSeconds) {
+          if (!mustSplit && compressedBlob.size <= MAX_DIRECT_SIZE && totalDuration <= maxSegmentSeconds) {
             setStatus({ step: 'transcribing', detail: 'status.transcribing', progress: 0 })
             const result = await transcribeChunk(
               new File([compressedBlob], 'audio.mp3', { type: 'audio/mpeg' }),
@@ -392,8 +400,9 @@ export function useAudioProcessor() {
           })
 
           // Extract single chunk — always encode to MP3 for reliable output.
-          // -ss before -i = input seeking (accurate); -c copy is unreliable
-          // in ffmpeg WASM and produces broken containers / wrong offsets.
+          // -ss AFTER -i (output seeking): ffmpeg WASM input seeking is broken
+          // and produces silent output. With encoding (not -c copy), output
+          // seeking correctly discards decoded audio before the seek point.
           const segmentAtExtraction = effectiveSegmentSeconds
           const chunkName = `${prefix}chunk_${String(chunkIndex).padStart(3, '0')}.mp3`
           trackedFiles.push(chunkName)
@@ -401,8 +410,8 @@ export function useAudioProcessor() {
           let chunkData: Uint8Array<ArrayBuffer>
           try {
             await ffmpeg.exec([
-              '-ss', String(offset),
               '-i', splitSource,
+              '-ss', String(offset),
               '-t', String(effectiveSegmentSeconds),
               '-b:a', '128k', '-ac', '1',
               '-y', chunkName,
