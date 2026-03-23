@@ -372,25 +372,45 @@ export function useAudioProcessor() {
 
         // Split using segment muxer — reads linearly, no seeking.
         // -ss/-t seeking in ffmpeg WASM is broken (wrong offsets or silence).
-        // The segment muxer encodes sequentially and starts a new file
-        // every N seconds, which avoids the issue entirely.
+        // -segment_list gives exact start/end times (getFileDuration is
+        // unreliable for MP3 chunks created by the segment muxer).
         setStatus({ step: 'transcribing', detail: 'status.chunkProgress', detailParams: { current: 0, total: '?' }, progress: 0 })
         const chunkPattern = `${prefix}chunk_%03d.mp3`
+        const segListFile = `${prefix}segments.csv`
         await ffmpeg.exec([
           '-i', segmentSource,
           '-f', 'segment',
           '-segment_time', String(effectiveSegmentSeconds),
+          '-segment_list', segListFile,
+          '-segment_list_type', 'csv',
           '-b:a', '128k', '-ac', '1',
           '-y', chunkPattern,
         ])
 
         if (isCancelled()) throw new Error('error.cancelled')
 
-        // Discover chunks, read into JS memory, and free ffmpeg FS
-        type ChunkInfo = { file: File; duration: number }
+        // Parse segment list for timing info (each line: filename,start,end)
+        const segListRaw = await ffmpeg.readFile(segListFile) as Uint8Array
+        const segListText = new TextDecoder().decode(segListRaw)
+        const segLines = segListText.trim().split('\n').filter(Boolean)
+        try { await ffmpeg.deleteFile(segListFile) } catch { /* ignore */ }
+
+        // Read chunks into JS memory using segment list for timing
+        type ChunkInfo = { file: File; duration: number; startTime: number; endTime: number }
         const chunks: ChunkInfo[] = []
-        for (let i = 0; ; i++) {
-          const name = `${prefix}chunk_${String(i).padStart(3, '0')}.mp3`
+        for (let i = 0; i < segLines.length; i++) {
+          const parts = segLines[i].split(',')
+          const name = parts[0] || `${prefix}chunk_${String(i).padStart(3, '0')}.mp3`
+          const segStart = parseFloat(parts[1]) || 0
+          const segEnd = parseFloat(parts[2]) || 0
+          const dur = segEnd - segStart
+
+          // Skip negligible final chunks (< 1 second)
+          if (dur < 1 && chunks.length > 0) {
+            try { await ffmpeg.deleteFile(name) } catch { /* ignore */ }
+            continue
+          }
+
           let raw: Uint8Array
           try {
             raw = await ffmpeg.readFile(name) as Uint8Array
@@ -399,19 +419,14 @@ export function useAudioProcessor() {
             try { await ffmpeg.deleteFile(name) } catch { /* ignore */ }
             break
           }
-          const dur = await getFileDuration(ffmpeg, name)
-          // Skip negligible final chunks (< 1 second)
-          if (dur < 1 && chunks.length > 0) {
-            try { await ffmpeg.deleteFile(name) } catch { /* ignore */ }
-            break
-          }
+
           const chunkFile = new File(
             [new Blob([new Uint8Array(raw)], { type: 'audio/mpeg' })],
             name,
             { type: 'audio/mpeg' },
           )
-          chunks.push({ file: chunkFile, duration: dur })
-          if (!isCancelled()) chunkBlobsRef.current[i] = chunkFile
+          chunks.push({ file: chunkFile, duration: dur, startTime: segStart, endTime: segEnd })
+          if (!isCancelled()) chunkBlobsRef.current[chunks.length - 1] = chunkFile
           trackedFiles.push(name)
           try { await ffmpeg.deleteFile(name) } catch { /* ignore */ }
         }
@@ -422,13 +437,11 @@ export function useAudioProcessor() {
         const results: string[] = []
         const chunkDurations: number[] = []
         let prevText = options.prompt || ''
-        let startTime = 0
 
         for (let i = 0; i < chunks.length; i++) {
           if (isCancelled()) throw new Error('error.cancelled')
 
-          const { file: chunkFile, duration: dur } = chunks[i]
-          const endTime = startTime + dur
+          const { file: chunkFile, duration: dur, startTime: chunkStart, endTime: chunkEnd } = chunks[i]
 
           setStatus({
             step: 'transcribing',
@@ -464,18 +477,16 @@ export function useAudioProcessor() {
             results.push('')
             updateChunkResults((prev) => [
               ...prev,
-              { index: i, text: '', duration: dur, startTime, endTime, status: 'error' as const, error: 'error.chunkFailed' },
+              { index: i, text: '', duration: dur, startTime: chunkStart, endTime: chunkEnd, status: 'error' as const, error: 'error.chunkFailed' },
             ])
           } else {
             results.push(result!)
             prevText = extractLastChars(result!, options.responseFormat, 200)
             updateChunkResults((prev) => [
               ...prev,
-              { index: i, text: result!, duration: dur, startTime, endTime, status: 'done' as const },
+              { index: i, text: result!, duration: dur, startTime: chunkStart, endTime: chunkEnd, status: 'done' as const },
             ])
           }
-
-          startTime = endTime
         }
 
         if (results.every((r) => r === '')) throw new Error('error.splitFailed')
