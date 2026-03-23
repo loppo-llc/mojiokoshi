@@ -8,7 +8,7 @@ import { mergeResults } from '../lib/subtitle-merger'
 
 const MAX_DIRECT_SIZE = 25 * 1024 * 1024 // 25MB
 const MIN_SEGMENT_SECONDS = 60 // absolute minimum to avoid tiny chunks
-const MAX_SEGMENT_SECONDS = 1390 // Whisper API max ~1400s, with margin for -c copy frame rounding
+const MAX_SEGMENT_SECONDS = 1390 // Whisper API max ~1400s, with safety margin
 const TARGET_CHUNK_SIZE = 24 * 1024 * 1024 // 24MB (leave 1MB margin under 25MB limit)
 const MAX_RETRIES = 2
 
@@ -19,22 +19,6 @@ function isCompressedAudio(filename: string): boolean {
   return COMPRESSED_EXTENSIONS.has(ext)
 }
 
-const MIME_BY_EXT: Record<string, string> = {
-  mp3: 'audio/mpeg',
-  m4a: 'audio/mp4',
-  aac: 'audio/aac',
-  ogg: 'audio/ogg',
-  webm: 'audio/webm',
-  mp4: 'audio/mp4',
-  opus: 'audio/ogg',
-  mpeg: 'audio/mpeg',
-  mpga: 'audio/mpeg',
-}
-
-function getAudioMimeType(filename: string): string {
-  const ext = filename.split('.').pop()?.toLowerCase() || ''
-  return MIME_BY_EXT[ext] || 'audio/mpeg'
-}
 
 async function transcribeChunk(
   file: File | Blob,
@@ -335,84 +319,21 @@ export function useAudioProcessor() {
 
         if (isCancelled()) throw new Error('error.cancelled')
 
-        // Calculate optimal segment duration based on file size and duration
+        // Calculate total duration
         const totalDuration = await getFileDuration(ffmpeg, inputName)
-        const bytesPerSecond = file.size / Math.max(totalDuration, 1)
-        const segmentSeconds = Math.min(
+
+        // Chunks are always encoded to 128kbps mono MP3, so calculate
+        // segment duration based on the known output bitrate.
+        const OUTPUT_BPS = 128000 / 8 // 16000 bytes/second
+        let splitSource = inputName
+        let effectiveSegmentSeconds = Math.min(
           maxSegmentSeconds,
-          Math.max(
-            MIN_SEGMENT_SECONDS,
-            Math.floor(TARGET_CHUNK_SIZE / bytesPerSecond),
-          ),
+          Math.max(MIN_SEGMENT_SECONDS, Math.floor(TARGET_CHUNK_SIZE / OUTPUT_BPS)),
         )
 
-        // Determine split source and parameters
-        let splitSource = inputName
-        let chunkExt = ext
-        let chunkMime = getAudioMimeType(file.name)
-        let effectiveSegmentSeconds = segmentSeconds
-
-        if (isCompressedAudio(file.name)) {
-          // Test if direct copy extraction works
-          const testName = `${prefix}test_chunk${ext}`
-          let directCopyOk = false
-          try {
-            await ffmpeg.exec([
-              '-i', inputName, '-ss', '0', '-t', String(segmentSeconds),
-              '-c', 'copy', '-y', testName,
-            ])
-            directCopyOk = true
-          } catch { /* direct copy not supported */ }
-          try { await ffmpeg.deleteFile(testName) } catch { /* ignore */ }
-
-          if (isCancelled()) throw new Error('error.cancelled')
-
-          if (!directCopyOk) {
-            // Fall back: recompress to MP3
-            setStatus({ step: 'compressing', detail: 'status.compressingFallback', progress: 0 })
-
-            const progressHandler = ({ progress }: { progress: number }) => {
-              if (isCancelled()) return
-              setStatus((prev) => ({ ...prev, progress: Math.round(progress * 100) }))
-            }
-            ffmpeg.on('progress', progressHandler)
-            try {
-              await ffmpeg.exec([
-                '-i', inputName, '-b:a', '128k', '-ac', '1', '-y', `${prefix}compressed.mp3`,
-              ])
-            } finally {
-              ffmpeg.off('progress', progressHandler)
-            }
-            trackedFiles.push(`${prefix}compressed.mp3`)
-
-            if (isCancelled()) throw new Error('error.cancelled')
-
-            const compressedRaw = await ffmpeg.readFile(`${prefix}compressed.mp3`) as Uint8Array
-            const compressedBlob = new Blob([new Uint8Array(compressedRaw)], { type: 'audio/mpeg' })
-
-            if (compressedBlob.size <= MAX_DIRECT_SIZE) {
-              setStatus({ step: 'transcribing', detail: 'status.transcribing', progress: 0 })
-              const result = await transcribeChunk(
-                new File([compressedBlob], 'audio.mp3', { type: 'audio/mpeg' }),
-                'audio.mp3', options, abortController.signal,
-              )
-              if (isCancelled()) throw new Error('error.cancelled')
-              await cleanup(ffmpeg, trackedFiles)
-              setStatus({ step: 'done', detail: '', progress: 100 })
-              return result
-            }
-
-            splitSource = `${prefix}compressed.mp3`
-            chunkExt = '.mp3'
-            chunkMime = 'audio/mpeg'
-            const compressedBps = compressedBlob.size / Math.max(totalDuration, 1)
-            effectiveSegmentSeconds = Math.min(
-              maxSegmentSeconds,
-              Math.max(MIN_SEGMENT_SECONDS, Math.floor(TARGET_CHUNK_SIZE / compressedBps)),
-            )
-          }
-        } else {
-          // Uncompressed audio (wav, flac, etc.): compress first
+        // For uncompressed audio, pre-compress to MP3 first — reduces
+        // ffmpeg decode overhead per chunk and enables the "fits in 25MB" shortcut.
+        if (!isCompressedAudio(file.name)) {
           setStatus({ step: 'compressing', detail: 'status.compressing', progress: 0 })
 
           const progressHandler = ({ progress }: { progress: number }) => {
@@ -434,7 +355,7 @@ export function useAudioProcessor() {
           const compressedRaw = await ffmpeg.readFile(`${prefix}compressed.mp3`) as Uint8Array
           const compressedBlob = new Blob([new Uint8Array(compressedRaw)], { type: 'audio/mpeg' })
 
-          if (compressedBlob.size <= MAX_DIRECT_SIZE) {
+          if (compressedBlob.size <= MAX_DIRECT_SIZE && totalDuration <= maxSegmentSeconds) {
             setStatus({ step: 'transcribing', detail: 'status.transcribing', progress: 0 })
             const result = await transcribeChunk(
               new File([compressedBlob], 'audio.mp3', { type: 'audio/mpeg' }),
@@ -447,13 +368,6 @@ export function useAudioProcessor() {
           }
 
           splitSource = `${prefix}compressed.mp3`
-          chunkExt = '.mp3'
-          chunkMime = 'audio/mpeg'
-          const compressedBps = compressedBlob.size / Math.max(totalDuration, 1)
-          effectiveSegmentSeconds = Math.min(
-            maxSegmentSeconds,
-            Math.max(MIN_SEGMENT_SECONDS, Math.floor(TARGET_CHUNK_SIZE / compressedBps)),
-          )
         }
 
         if (isCancelled()) throw new Error('error.cancelled')
@@ -464,7 +378,6 @@ export function useAudioProcessor() {
         let prevText = options.prompt || ''
         let offset = 0
         let chunkIndex = 0
-        let useCopyExtract = true // start with fast -c copy; fall back to encode on corruption
 
         while (offset < totalDuration) {
           if (isCancelled()) throw new Error('error.cancelled')
@@ -478,35 +391,26 @@ export function useAudioProcessor() {
             progress: Math.round((offset / totalDuration) * 100),
           })
 
-          // Extract single chunk
+          // Extract single chunk — always encode to MP3 for reliable output.
+          // -ss before -i = input seeking (accurate); -c copy is unreliable
+          // in ffmpeg WASM and produces broken containers / wrong offsets.
           const segmentAtExtraction = effectiveSegmentSeconds
-          const chunkName = `${prefix}chunk_${String(chunkIndex).padStart(3, '0')}${useCopyExtract ? chunkExt : '.mp3'}`
+          const chunkName = `${prefix}chunk_${String(chunkIndex).padStart(3, '0')}.mp3`
           trackedFiles.push(chunkName)
 
           let chunkData: Uint8Array<ArrayBuffer>
           try {
-            const extractArgs = [
-              '-i', splitSource,
+            await ffmpeg.exec([
               '-ss', String(offset),
+              '-i', splitSource,
               '-t', String(effectiveSegmentSeconds),
-            ]
-            if (useCopyExtract) {
-              extractArgs.push('-c', 'copy')
-            } else {
-              extractArgs.push('-b:a', '128k', '-ac', '1')
-            }
-            extractArgs.push('-y', chunkName)
-            await ffmpeg.exec(extractArgs)
+              '-b:a', '128k', '-ac', '1',
+              '-y', chunkName,
+            ])
             const chunkRaw = await ffmpeg.readFile(chunkName) as Uint8Array
             chunkData = new Uint8Array(chunkRaw) as Uint8Array<ArrayBuffer>
             if (chunkData.length === 0) break
           } catch {
-            // Copy extraction failed — retry with encoding before giving up
-            if (useCopyExtract) {
-              useCopyExtract = false
-              try { await ffmpeg.deleteFile(chunkName) } catch { /* ignore */ }
-              continue
-            }
             if (results.length > 0) break
             throw new Error('error.splitFailed')
           }
@@ -519,50 +423,26 @@ export function useAudioProcessor() {
             break
           }
 
-          const effectiveMime = useCopyExtract ? chunkMime : 'audio/mpeg'
-
           // Save as File for retry
           let chunkFile = new File(
-            [new Blob([chunkData], { type: effectiveMime })],
+            [new Blob([chunkData], { type: 'audio/mpeg' })],
             chunkName,
-            { type: effectiveMime },
+            { type: 'audio/mpeg' },
           )
           if (!isCancelled()) chunkBlobsRef.current[chunkIndex] = chunkFile
 
           // Free ffmpeg memory
           try { await ffmpeg.deleteFile(chunkName) } catch { /* ignore */ }
 
-          // Handle oversize chunk (rare: high-bitrate compressed audio)
-          let chunkBlob: Blob = chunkFile
-          let chunkFilename = chunkFile.name
-
-          if (chunkFile.size > MAX_DIRECT_SIZE) {
-            const tmpIn = `${prefix}oversize_in${useCopyExtract ? chunkExt : '.mp3'}`
-            const tmpOut = `${prefix}oversize_out.mp3`
-            try {
-              await ffmpeg.writeFile(tmpIn, await fetchFile(chunkFile))
-              await ffmpeg.exec(['-i', tmpIn, '-b:a', '128k', '-ac', '1', '-y', tmpOut])
-              const recompressed = await ffmpeg.readFile(tmpOut) as Uint8Array
-              chunkBlob = new Blob([new Uint8Array(recompressed)], { type: 'audio/mpeg' })
-              chunkFilename = `chunk_${chunkIndex}.mp3`
-              if (!isCancelled()) {
-                chunkBlobsRef.current[chunkIndex] = new File([chunkBlob], chunkFilename, { type: 'audio/mpeg' })
-              }
-            } finally {
-              try { await ffmpeg.deleteFile(tmpIn) } catch { /* ignore */ }
-              try { await ffmpeg.deleteFile(tmpOut) } catch { /* ignore */ }
-            }
-          }
-
-          // Transcribe with retry (handles token-too-large and corrupted chunk errors)
-          let fileToSend = new File([chunkBlob], chunkFilename, { type: chunkBlob.type })
+          // Transcribe with retry
+          let fileToSend: File = chunkFile
           let result: string | null = null
           let tokenLimitHit = false
           let chunkFailed = false
           try {
             for (let retry = 0; retry <= MAX_RETRIES; retry++) {
               try {
-                result = await transcribeChunk(fileToSend, chunkFilename, {
+                result = await transcribeChunk(fileToSend, fileToSend.name, {
                   ...options,
                   prompt: prevText,
                 }, abortController.signal)
@@ -574,36 +454,6 @@ export function useAudioProcessor() {
                   tokenLimitHit = true
                   break
                 }
-                // On corrupted/unsupported: re-extract from source with encoding (once)
-                if (/corrupted|unsupported/i.test(errMsg) && retry === 0 && useCopyExtract) {
-                  const reextractName = `${prefix}reextract_${chunkIndex}.mp3`
-                  try {
-                    await ffmpeg.exec([
-                      '-i', splitSource,
-                      '-ss', String(offset),
-                      '-t', String(segmentAtExtraction),
-                      '-b:a', '128k', '-ac', '1',
-                      '-y', reextractName,
-                    ])
-                    const reencoded = await ffmpeg.readFile(reextractName) as Uint8Array
-                    chunkBlob = new Blob([new Uint8Array(reencoded)], { type: 'audio/mpeg' })
-                    chunkFilename = `chunk_${chunkIndex}.mp3`
-                    fileToSend = new File([chunkBlob], chunkFilename, { type: 'audio/mpeg' })
-                    if (!isCancelled()) {
-                      chunkBlobsRef.current[chunkIndex] = new File([chunkBlob], chunkFilename, { type: 'audio/mpeg' })
-                    }
-                  } catch {
-                    if (isCancelled()) throw new Error('error.cancelled')
-                    chunkFailed = true
-                    break
-                  } finally {
-                    try { await ffmpeg.deleteFile(reextractName) } catch { /* ignore */ }
-                  }
-                  if (isCancelled()) throw new Error('error.cancelled')
-                  // -c copy produced corrupt output; switch all subsequent chunks to encode
-                  useCopyExtract = false
-                  continue
-                }
                 if (retry === MAX_RETRIES) {
                   chunkFailed = true
                   break
@@ -612,7 +462,6 @@ export function useAudioProcessor() {
               }
             }
           } catch (err) {
-            // Catch any unexpected error in retry loop — record as failed chunk instead of killing everything
             if (isCancelled()) throw new Error('error.cancelled')
             chunkFailed = true
           }
