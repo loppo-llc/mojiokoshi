@@ -374,7 +374,7 @@ export function useAudioProcessor() {
         // -ss/-t seeking in ffmpeg WASM is broken (wrong offsets or silence).
         // -segment_list gives exact start/end times (getFileDuration is
         // unreliable for MP3 chunks created by the segment muxer).
-        setStatus({ step: 'transcribing', detail: 'status.chunkProgress', detailParams: { current: 0, total: '?' }, progress: 0 })
+        setStatus({ step: 'transcribing', detail: 'status.splitting', progress: 0 })
         const chunkPattern = `${prefix}chunk_%03d.mp3`
         const segListFile = `${prefix}segments.csv`
         await ffmpeg.exec([
