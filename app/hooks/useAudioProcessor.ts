@@ -464,6 +464,7 @@ export function useAudioProcessor() {
         let prevText = options.prompt || ''
         let offset = 0
         let chunkIndex = 0
+        let useCopyExtract = true // start with fast -c copy; fall back to encode on corruption
 
         while (offset < totalDuration) {
           if (isCancelled()) throw new Error('error.cancelled')
@@ -477,26 +478,35 @@ export function useAudioProcessor() {
             progress: Math.round((offset / totalDuration) * 100),
           })
 
-          // Extract single chunk (frame-level precision is sufficient for transcription)
+          // Extract single chunk
           const segmentAtExtraction = effectiveSegmentSeconds
-          const chunkName = `${prefix}chunk_${String(chunkIndex).padStart(3, '0')}${chunkExt}`
+          const chunkName = `${prefix}chunk_${String(chunkIndex).padStart(3, '0')}${useCopyExtract ? chunkExt : '.mp3'}`
           trackedFiles.push(chunkName)
 
           let chunkData: Uint8Array<ArrayBuffer>
           try {
-            await ffmpeg.exec([
+            const extractArgs = [
               '-i', splitSource,
               '-ss', String(offset),
               '-t', String(effectiveSegmentSeconds),
-              '-c', 'copy',
-              '-y',
-              chunkName,
-            ])
+            ]
+            if (useCopyExtract) {
+              extractArgs.push('-c', 'copy')
+            } else {
+              extractArgs.push('-b:a', '128k', '-ac', '1')
+            }
+            extractArgs.push('-y', chunkName)
+            await ffmpeg.exec(extractArgs)
             const chunkRaw = await ffmpeg.readFile(chunkName) as Uint8Array
             chunkData = new Uint8Array(chunkRaw) as Uint8Array<ArrayBuffer>
             if (chunkData.length === 0) break
           } catch {
-            // Extraction failed — return partial results if any, otherwise fail
+            // Copy extraction failed — retry with encoding before giving up
+            if (useCopyExtract) {
+              useCopyExtract = false
+              try { await ffmpeg.deleteFile(chunkName) } catch { /* ignore */ }
+              continue
+            }
             if (results.length > 0) break
             throw new Error('error.splitFailed')
           }
@@ -509,13 +519,15 @@ export function useAudioProcessor() {
             break
           }
 
+          const effectiveMime = useCopyExtract ? chunkMime : 'audio/mpeg'
+
           // Save as File for retry
           let chunkFile = new File(
-            [new Blob([chunkData], { type: chunkMime })],
+            [new Blob([chunkData], { type: effectiveMime })],
             chunkName,
-            { type: chunkMime },
+            { type: effectiveMime },
           )
-          chunkBlobsRef.current[chunkIndex] = chunkFile
+          if (!isCancelled()) chunkBlobsRef.current[chunkIndex] = chunkFile
 
           // Free ffmpeg memory
           try { await ffmpeg.deleteFile(chunkName) } catch { /* ignore */ }
@@ -525,7 +537,7 @@ export function useAudioProcessor() {
           let chunkFilename = chunkFile.name
 
           if (chunkFile.size > MAX_DIRECT_SIZE) {
-            const tmpIn = `${prefix}oversize_in${chunkExt}`
+            const tmpIn = `${prefix}oversize_in${useCopyExtract ? chunkExt : '.mp3'}`
             const tmpOut = `${prefix}oversize_out.mp3`
             try {
               await ffmpeg.writeFile(tmpIn, await fetchFile(chunkFile))
@@ -533,7 +545,9 @@ export function useAudioProcessor() {
               const recompressed = await ffmpeg.readFile(tmpOut) as Uint8Array
               chunkBlob = new Blob([new Uint8Array(recompressed)], { type: 'audio/mpeg' })
               chunkFilename = `chunk_${chunkIndex}.mp3`
-              chunkBlobsRef.current[chunkIndex] = new File([chunkBlob], chunkFilename, { type: 'audio/mpeg' })
+              if (!isCancelled()) {
+                chunkBlobsRef.current[chunkIndex] = new File([chunkBlob], chunkFilename, { type: 'audio/mpeg' })
+              }
             } finally {
               try { await ffmpeg.deleteFile(tmpIn) } catch { /* ignore */ }
               try { await ffmpeg.deleteFile(tmpOut) } catch { /* ignore */ }
@@ -560,27 +574,34 @@ export function useAudioProcessor() {
                   tokenLimitHit = true
                   break
                 }
-                // Re-encode corrupted chunk and retry (once)
-                if (/corrupted|unsupported/i.test(errMsg) && retry === 0) {
-                  const tmpIn = `${prefix}reencode_in${chunkExt}`
-                  const tmpOut = `${prefix}reencode_out.mp3`
+                // On corrupted/unsupported: re-extract from source with encoding (once)
+                if (/corrupted|unsupported/i.test(errMsg) && retry === 0 && useCopyExtract) {
+                  const reextractName = `${prefix}reextract_${chunkIndex}.mp3`
                   try {
-                    await ffmpeg.writeFile(tmpIn, await fetchFile(chunkBlob))
-                    await ffmpeg.exec(['-i', tmpIn, '-b:a', '128k', '-ac', '1', '-y', tmpOut])
-                    const reencoded = await ffmpeg.readFile(tmpOut) as Uint8Array
+                    await ffmpeg.exec([
+                      '-i', splitSource,
+                      '-ss', String(offset),
+                      '-t', String(segmentAtExtraction),
+                      '-b:a', '128k', '-ac', '1',
+                      '-y', reextractName,
+                    ])
+                    const reencoded = await ffmpeg.readFile(reextractName) as Uint8Array
                     chunkBlob = new Blob([new Uint8Array(reencoded)], { type: 'audio/mpeg' })
                     chunkFilename = `chunk_${chunkIndex}.mp3`
                     fileToSend = new File([chunkBlob], chunkFilename, { type: 'audio/mpeg' })
-                    chunkBlobsRef.current[chunkIndex] = new File([chunkBlob], chunkFilename, { type: 'audio/mpeg' })
+                    if (!isCancelled()) {
+                      chunkBlobsRef.current[chunkIndex] = new File([chunkBlob], chunkFilename, { type: 'audio/mpeg' })
+                    }
                   } catch {
-                    // Re-encode failed — mark chunk as failed (but propagate cancel)
                     if (isCancelled()) throw new Error('error.cancelled')
                     chunkFailed = true
                     break
                   } finally {
-                    try { await ffmpeg.deleteFile(tmpIn) } catch { /* ignore */ }
-                    try { await ffmpeg.deleteFile(tmpOut) } catch { /* ignore */ }
+                    try { await ffmpeg.deleteFile(reextractName) } catch { /* ignore */ }
                   }
+                  if (isCancelled()) throw new Error('error.cancelled')
+                  // -c copy produced corrupt output; switch all subsequent chunks to encode
+                  useCopyExtract = false
                   continue
                 }
                 if (retry === MAX_RETRIES) {
