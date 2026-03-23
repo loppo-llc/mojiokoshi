@@ -12,12 +12,6 @@ const MAX_SEGMENT_SECONDS = 1390 // Whisper API max ~1400s, with safety margin
 const TARGET_CHUNK_SIZE = 24 * 1024 * 1024 // 24MB (leave 1MB margin under 25MB limit)
 const MAX_RETRIES = 2
 
-const COMPRESSED_EXTENSIONS = new Set(['mp3', 'm4a', 'aac', 'ogg', 'webm', 'mp4', 'opus', 'mpeg', 'mpga'])
-
-function isCompressedAudio(filename: string): boolean {
-  const ext = filename.split('.').pop()?.toLowerCase() || ''
-  return COMPRESSED_EXTENSIONS.has(ext)
-}
 
 
 async function transcribeChunk(
@@ -330,60 +324,58 @@ export function useAudioProcessor() {
           Math.max(MIN_SEGMENT_SECONDS, Math.floor(TARGET_CHUNK_SIZE / OUTPUT_BPS)),
         )
 
-        // For uncompressed audio, re-encode to MP3 first (reduces size for
-        // the "fits in 25MB" shortcut and for the segment muxer source).
-        // For compressed audio, use the original file directly.
-        let segmentSource = inputName
-        if (!isCompressedAudio(file.name)) {
-          setStatus({ step: 'compressing', detail: 'status.compressing', progress: 0 })
-          const progressHandler = ({ progress }: { progress: number }) => {
-            if (isCancelled()) return
-            setStatus((prev) => ({ ...prev, progress: Math.round(progress * 100) }))
-          }
-          ffmpeg.on('progress', progressHandler)
-          try {
-            await ffmpeg.exec([
-              '-i', inputName, '-b:a', '128k', '-ac', '1', '-y', `${prefix}compressed.mp3`,
-            ])
-          } finally {
-            ffmpeg.off('progress', progressHandler)
-          }
-          trackedFiles.push(`${prefix}compressed.mp3`)
+        // Step 1: Encode entire file to 128kbps mono MP3.
+        // This normalises any input format and ensures consistent bitrate
+        // for chunk size calculation.
+        setStatus({ step: 'compressing', detail: 'status.compressing', progress: 0 })
+        const compressedName = `${prefix}compressed.mp3`
+        const progressHandler = ({ progress }: { progress: number }) => {
+          if (isCancelled()) return
+          setStatus((prev) => ({ ...prev, progress: Math.round(progress * 100) }))
+        }
+        ffmpeg.on('progress', progressHandler)
+        try {
+          await ffmpeg.exec([
+            '-i', inputName, '-b:a', '128k', '-ac', '1', '-y', compressedName,
+          ])
+        } finally {
+          ffmpeg.off('progress', progressHandler)
+        }
+        trackedFiles.push(compressedName)
+        if (isCancelled()) throw new Error('error.cancelled')
+
+        const compressedRaw = await ffmpeg.readFile(compressedName) as Uint8Array
+        const compressedBlob = new Blob([new Uint8Array(compressedRaw)], { type: 'audio/mpeg' })
+
+        // If compressed fits in 25MB and under duration limit, send directly
+        if (!mustSplit && compressedBlob.size <= MAX_DIRECT_SIZE && totalDuration <= maxSegmentSeconds) {
+          setStatus({ step: 'transcribing', detail: 'status.transcribing', progress: 0 })
+          const result = await transcribeChunk(
+            new File([compressedBlob], 'audio.mp3', { type: 'audio/mpeg' }),
+            'audio.mp3', options, abortController.signal,
+          )
           if (isCancelled()) throw new Error('error.cancelled')
-
-          const compressedRaw = await ffmpeg.readFile(`${prefix}compressed.mp3`) as Uint8Array
-          const compressedBlob = new Blob([new Uint8Array(compressedRaw)], { type: 'audio/mpeg' })
-
-          if (!mustSplit && compressedBlob.size <= MAX_DIRECT_SIZE && totalDuration <= maxSegmentSeconds) {
-            setStatus({ step: 'transcribing', detail: 'status.transcribing', progress: 0 })
-            const result = await transcribeChunk(
-              new File([compressedBlob], 'audio.mp3', { type: 'audio/mpeg' }),
-              'audio.mp3', options, abortController.signal,
-            )
-            if (isCancelled()) throw new Error('error.cancelled')
-            await cleanup(ffmpeg, trackedFiles)
-            setStatus({ step: 'done', detail: '', progress: 100 })
-            return result
-          }
-          segmentSource = `${prefix}compressed.mp3`
+          await cleanup(ffmpeg, trackedFiles)
+          setStatus({ step: 'done', detail: '', progress: 100 })
+          return result
         }
 
         if (isCancelled()) throw new Error('error.cancelled')
 
-        // Split using segment muxer — reads linearly, no seeking.
-        // -ss/-t seeking in ffmpeg WASM is broken (wrong offsets or silence).
-        // -segment_list gives exact start/end times (getFileDuration is
-        // unreliable for MP3 chunks created by the segment muxer).
+        // Step 2: Split the MP3 using segment muxer with -c copy.
+        // Encoding + segment muxer is broken in ffmpeg WASM (encoder
+        // doesn't flush between segments → empty files). With -c copy,
+        // MP3 frames are simply copied to output files — no encoder involved.
         setStatus({ step: 'transcribing', detail: 'status.splitting', progress: 0 })
         const chunkPattern = `${prefix}chunk_%03d.mp3`
         const segListFile = `${prefix}segments.csv`
         await ffmpeg.exec([
-          '-i', segmentSource,
+          '-i', compressedName,
           '-f', 'segment',
           '-segment_time', String(effectiveSegmentSeconds),
           '-segment_list', segListFile,
           '-segment_list_type', 'csv',
-          '-b:a', '128k', '-ac', '1',
+          '-c', 'copy',
           '-y', chunkPattern,
         ])
 
