@@ -199,10 +199,50 @@ export function useAudioProcessor() {
           prompt = extractLastChars(prevChunk.text, opts.responseFormat, 200)
         }
 
-        const result = await transcribeChunk(chunkFile, chunkFile.name, {
-          ...opts,
-          prompt,
-        }, abortController.signal)
+        let fileToSend: File = chunkFile
+        let result: string
+        try {
+          result = await transcribeChunk(fileToSend, fileToSend.name, {
+            ...opts,
+            prompt,
+          }, abortController.signal)
+        } catch (firstErr) {
+          if (jobIdRef.current !== retryJobId) throw new Error('error.cancelled')
+          const errMsg = firstErr instanceof Error ? firstErr.message : ''
+          // Re-encode corrupted chunk via ffmpeg and retry once
+          if (!/corrupted|unsupported/i.test(errMsg)) throw firstErr
+
+          // Re-encode to MP3; on failure rethrow the original API error
+          let reencoded = false
+          const nonce = Date.now()
+          const tmpIn = `retry_${retryJobId}_${index}_${nonce}_in${getExtension(fileToSend.name)}`
+          const tmpOut = `retry_${retryJobId}_${index}_${nonce}_out.mp3`
+          let ffmpeg: FFmpeg | null = null
+          try {
+            ffmpeg = await loadFFmpeg()
+            await ffmpeg.writeFile(tmpIn, await fetchFile(fileToSend))
+            await ffmpeg.exec(['-i', tmpIn, '-b:a', '128k', '-ac', '1', '-y', tmpOut])
+            const raw = await ffmpeg.readFile(tmpOut) as Uint8Array
+            const blob = new Blob([new Uint8Array(raw)], { type: 'audio/mpeg' })
+            const name = `chunk_${index}.mp3`
+            fileToSend = new File([blob], name, { type: 'audio/mpeg' })
+            reencoded = true
+          } catch {
+            throw firstErr
+          } finally {
+            if (ffmpeg) {
+              try { await ffmpeg.deleteFile(tmpIn) } catch { /* ignore */ }
+              try { await ffmpeg.deleteFile(tmpOut) } catch { /* ignore */ }
+            }
+          }
+
+          if (jobIdRef.current !== retryJobId) throw new Error('error.cancelled')
+          if (reencoded) chunkBlobsRef.current[index] = fileToSend
+          result = await transcribeChunk(fileToSend, fileToSend.name, {
+            ...opts,
+            prompt,
+          }, abortController.signal)
+        }
 
         // Check if job changed during retry
         if (jobIdRef.current !== retryJobId) throw new Error('error.cancelled')
@@ -235,7 +275,7 @@ export function useAudioProcessor() {
         throw err
       }
     },
-    [updateChunkResults],
+    [updateChunkResults, loadFFmpeg],
   )
 
   const processAndTranscribe = useCallback(
