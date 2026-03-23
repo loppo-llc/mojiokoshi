@@ -505,7 +505,7 @@ export default function Home() {
               </div>
 
               {/* Chunk Details */}
-              {chunkResults.length > 1 && (
+              {chunkResults.length >= 1 && (
                 <div className="mt-4">
                   <button
                     onClick={() => setShowChunks(!showChunks)}
