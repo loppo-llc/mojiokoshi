@@ -100,7 +100,6 @@ export default function Home() {
 
   const promptRestoredRef = useRef(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const submitIdRef = useRef(0)
   const { processAndTranscribe, status, cancel, chunkResults, retryChunk } = useAudioProcessor()
 
   useEffect(() => {
@@ -180,7 +179,6 @@ export default function Home() {
       return
     }
 
-    const currentSubmitId = ++submitIdRef.current
     setIsLoading(true)
     setError(null)
     setResult('')
@@ -199,23 +197,18 @@ export default function Home() {
         language,
         prompt,
       })
-      if (submitIdRef.current !== currentSubmitId) return
       setResult(text)
     } catch (err) {
-      if (submitIdRef.current !== currentSubmitId) return
       const rawMsg = err instanceof Error ? err.message : 'error.generic'
       if (rawMsg !== 'error.cancelled') {
         setError(t(rawMsg))
       }
     } finally {
-      if (submitIdRef.current === currentSubmitId) {
-        setIsLoading(false)
-      }
+      setIsLoading(false)
     }
   }
 
   const handleCancel = () => {
-    submitIdRef.current++
     cancel()
     setIsLoading(false)
   }
