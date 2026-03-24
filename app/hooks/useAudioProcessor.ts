@@ -6,11 +6,20 @@ import { toBlobURL, fetchFile } from '@ffmpeg/util'
 import type { ProcessingStatus, TranscribeOptions, ChunkResult } from '../lib/types'
 import { mergeResults } from '../lib/subtitle-merger'
 import { transcribeChunk, extractLastChars } from '../lib/transcribe'
+import {
+  compressAudio,
+  splitIntoChunks,
+  recoverCorruptChunk,
+  getFileDuration,
+  getExtension,
+  cleanupFiles,
+  type ChunkInfo,
+} from '../lib/ffmpeg-pipeline'
 
 const MAX_DIRECT_SIZE = 25 * 1024 * 1024 // 25MB
-const MIN_SEGMENT_SECONDS = 60 // absolute minimum to avoid tiny chunks
-const MAX_SEGMENT_SECONDS = 1390 // Whisper API max ~1400s, with safety margin
-const TARGET_CHUNK_SIZE = 24 * 1024 * 1024 // 24MB (leave 1MB margin under 25MB limit)
+const MIN_SEGMENT_SECONDS = 60
+const MAX_SEGMENT_SECONDS = 1390
+const TARGET_CHUNK_SIZE = 24 * 1024 * 1024
 const MAX_RETRIES = 2
 
 export function useAudioProcessor() {
@@ -59,33 +68,6 @@ export function useAudioProcessor() {
     return ffmpeg
   }, [])
 
-  const getFileDuration = useCallback(async (ffmpeg: FFmpeg, filename: string): Promise<number> => {
-    let logOutput = ''
-    const logHandler = ({ message }: { message: string }) => {
-      logOutput += message + '\n'
-    }
-    ffmpeg.on('log', logHandler)
-
-    try {
-      await ffmpeg.exec(['-i', filename, '-f', 'null', '-'])
-    } catch {
-      // ffmpeg may return non-zero but still prints duration
-    }
-
-    ffmpeg.off('log', logHandler)
-
-    const match = logOutput.match(/Duration:\s*(\d+):(\d+):(\d+)\.(\d+)/)
-    if (match) {
-      return (
-        parseInt(match[1]) * 3600 +
-        parseInt(match[2]) * 60 +
-        parseInt(match[3]) +
-        parseInt(match[4]) / Math.pow(10, match[4].length)
-      )
-    }
-    return 600 // fallback: assume 10 minutes if duration detection fails
-  }, [])
-
   const retryChunk = useCallback(
     async (index: number): Promise<string> => {
       const opts = jobOptionsRef.current
@@ -96,24 +78,18 @@ export function useAudioProcessor() {
 
       const retryJobId = jobIdRef.current
       const abortController = new AbortController()
-      // Don't overwrite abortRef — it belongs to the main job.
-      // Retry uses its own independent controller.
 
-      // Save original status before marking as retrying
       const origChunk = chunkResultsRef.current.find((c) => c.index === index)
       const origStatus = origChunk?.status || 'error'
 
-      // Mark as retrying
       updateChunkResults((prev) =>
         prev.map((c) => (c.index === index ? { ...c, status: 'retrying' as const } : c)),
       )
 
       try {
-        // Build prompt from previous chunk (find by index, not array position)
         let prompt = initialPromptRef.current
-        const currentResults = chunkResultsRef.current
-        const prevChunk = currentResults.find((c) => c.index === index - 1)
-        if (prevChunk && prevChunk.text) {
+        const prevChunk = chunkResultsRef.current.find((c) => c.index === index - 1)
+        if (prevChunk?.text) {
           prompt = extractLastChars(prevChunk.text, opts.responseFormat, 200)
         }
 
@@ -127,47 +103,25 @@ export function useAudioProcessor() {
         } catch (firstErr) {
           if (jobIdRef.current !== retryJobId) throw new Error('error.cancelled')
           const errMsg = firstErr instanceof Error ? firstErr.message : ''
-          // Re-encode corrupted chunk via ffmpeg and retry once
           if (!/corrupted|unsupported/i.test(errMsg)) throw firstErr
 
-          // Re-encode to MP3; on failure rethrow the original API error
-          let reencoded = false
-          const nonce = Date.now()
-          const tmpIn = `retry_${retryJobId}_${index}_${nonce}_in${getExtension(fileToSend.name)}`
-          const tmpOut = `retry_${retryJobId}_${index}_${nonce}_out.mp3`
-          let ffmpeg: FFmpeg | null = null
           try {
-            ffmpeg = await loadFFmpeg()
-            await ffmpeg.writeFile(tmpIn, await fetchFile(fileToSend))
-            await ffmpeg.exec(['-i', tmpIn, '-b:a', '128k', '-ac', '1', '-y', tmpOut])
-            const raw = await ffmpeg.readFile(tmpOut) as Uint8Array
-            const blob = new Blob([new Uint8Array(raw)], { type: 'audio/mpeg' })
-            const name = `chunk_${index}.mp3`
-            fileToSend = new File([blob], name, { type: 'audio/mpeg' })
-            reencoded = true
+            const ffmpeg = await loadFFmpeg()
+            fileToSend = await recoverCorruptChunk(ffmpeg, fileToSend, index, Date.now())
           } catch {
             throw firstErr
-          } finally {
-            if (ffmpeg) {
-              try { await ffmpeg.deleteFile(tmpIn) } catch { /* ignore */ }
-              try { await ffmpeg.deleteFile(tmpOut) } catch { /* ignore */ }
-            }
           }
 
           if (jobIdRef.current !== retryJobId) throw new Error('error.cancelled')
-          if (reencoded) chunkBlobsRef.current[index] = fileToSend
+          chunkBlobsRef.current[index] = fileToSend
           result = await transcribeChunk(fileToSend, fileToSend.name, {
             ...opts,
             prompt,
           }, abortController.signal)
         }
 
-        // Check if job changed during retry
         if (jobIdRef.current !== retryJobId) throw new Error('error.cancelled')
 
-        // Update chunk result and re-merge. mergeResults runs inside the
-        // updater so it always sees the latest prev state. try-catch
-        // prevents a merge exception from crashing React's render phase.
         let merged = ''
         updateChunkResults((prev) => {
           const next = prev.map((c) =>
@@ -185,7 +139,6 @@ export function useAudioProcessor() {
         })
         return merged
       } catch (err) {
-        // Revert to original status on failure (only if same job)
         if (jobIdRef.current === retryJobId) {
           updateChunkResults((prev) =>
             prev.map((c) => (c.index === index ? { ...c, status: origStatus } : c)),
@@ -199,7 +152,6 @@ export function useAudioProcessor() {
 
   const processAndTranscribe = useCallback(
     async (file: File, options: TranscribeOptions): Promise<string> => {
-      // Increment job ID to invalidate any previous job
       const currentJobId = ++jobIdRef.current
       const abortController = new AbortController()
       abortRef.current = abortController
@@ -210,9 +162,9 @@ export function useAudioProcessor() {
 
       const isCancelled = () => jobIdRef.current !== currentJobId || abortController.signal.aborted
       let maxSegmentSeconds = MAX_SEGMENT_SECONDS
-      let mustSplit = false // set when initial direct transcribe fails with token/duration limit
+      let mustSplit = false
 
-      // Small file: try direct transcribe, fall through to split if duration exceeded
+      // Small file: try direct transcribe
       if (file.size <= MAX_DIRECT_SIZE) {
         setStatus({ step: 'transcribing', detail: 'status.transcribing', progress: 0 })
         try {
@@ -223,14 +175,11 @@ export function useAudioProcessor() {
         } catch (err) {
           if (isCancelled()) throw new Error('error.cancelled')
           const msg = err instanceof Error ? err.message : ''
-          // Detect duration-exceeded error: "audio duration X seconds is longer than Y seconds ..."
           const durationMatch = msg.match(/duration\s+[\d.]+\s+seconds\s+is\s+longer\s+than\s+([\d.]+)\s+seconds/i)
           if (durationMatch) {
-            // Extract model-specific max duration and fall through to ffmpeg split path
             maxSegmentSeconds = Math.max(MIN_SEGMENT_SECONDS, Math.floor(parseFloat(durationMatch[1])) - 10)
             mustSplit = true
           } else if (/tokens.*too large|too large.*tokens/i.test(msg)) {
-            // Token limit exceeded — fall through to ffmpeg split path with reduced segment
             maxSegmentSeconds = Math.min(maxSegmentSeconds, 600)
             mustSplit = true
           } else {
@@ -240,55 +189,37 @@ export function useAudioProcessor() {
         }
       }
 
-      // Large file: need ffmpeg
+      // Large file: FFmpeg pipeline
       const trackedFiles: string[] = []
 
       try {
         setStatus({ step: 'loading-ffmpeg', detail: 'status.loadingFfmpeg', progress: 0 })
         const ffmpeg = await loadFFmpeg()
-
         if (isCancelled()) throw new Error('error.cancelled')
 
         const prefix = `j${currentJobId}_`
-        const ext = getExtension(file.name)
-        const inputName = `${prefix}input${ext}`
+        const inputName = `${prefix}input${getExtension(file.name)}`
         trackedFiles.push(inputName)
         await ffmpeg.writeFile(inputName, await fetchFile(file))
-
         if (isCancelled()) throw new Error('error.cancelled')
 
-        // Calculate total duration and segment size
         const totalDuration = await getFileDuration(ffmpeg, inputName)
-        const OUTPUT_BPS = 128000 / 8 // 16000 bytes/second for 128kbps mono MP3
+        const OUTPUT_BPS = 128000 / 8
         const effectiveSegmentSeconds = Math.min(
           maxSegmentSeconds,
           Math.max(MIN_SEGMENT_SECONDS, Math.floor(TARGET_CHUNK_SIZE / OUTPUT_BPS)),
         )
 
-        // Step 1: Encode entire file to 128kbps mono MP3.
-        // This normalises any input format and ensures consistent bitrate
-        // for chunk size calculation.
+        // Compress
         setStatus({ step: 'compressing', detail: 'status.compressing', progress: 0 })
         const compressedName = `${prefix}compressed.mp3`
-        const progressHandler = ({ progress }: { progress: number }) => {
-          if (isCancelled()) return
-          setStatus((prev) => ({ ...prev, progress: Math.round(progress * 100) }))
-        }
-        ffmpeg.on('progress', progressHandler)
-        try {
-          await ffmpeg.exec([
-            '-i', inputName, '-b:a', '128k', '-ac', '1', '-y', compressedName,
-          ])
-        } finally {
-          ffmpeg.off('progress', progressHandler)
-        }
         trackedFiles.push(compressedName)
+        const compressedBlob = await compressAudio(ffmpeg, inputName, compressedName, (p) => {
+          if (!isCancelled()) setStatus((prev) => ({ ...prev, progress: Math.round(p * 100) }))
+        })
         if (isCancelled()) throw new Error('error.cancelled')
 
-        const compressedRaw = await ffmpeg.readFile(compressedName) as Uint8Array
-        const compressedBlob = new Blob([new Uint8Array(compressedRaw)], { type: 'audio/mpeg' })
-
-        // If compressed fits in 25MB and under duration limit, send directly
+        // If compressed fits, send directly
         if (!mustSplit && compressedBlob.size <= MAX_DIRECT_SIZE && totalDuration <= maxSegmentSeconds) {
           setStatus({ step: 'transcribing', detail: 'status.transcribing', progress: 0 })
           const result = await transcribeChunk(
@@ -296,158 +227,41 @@ export function useAudioProcessor() {
             'audio.mp3', options, abortController.signal,
           )
           if (isCancelled()) throw new Error('error.cancelled')
-          await cleanup(ffmpeg, trackedFiles)
+          await cleanupFiles(ffmpeg, trackedFiles)
           setStatus({ step: 'done', detail: '', progress: 100 })
           return result
         }
-
         if (isCancelled()) throw new Error('error.cancelled')
 
-        // Step 2: Split the MP3 using segment muxer with -c copy.
-        // Encoding + segment muxer is broken in ffmpeg WASM (encoder
-        // doesn't flush between segments → empty files). With -c copy,
-        // MP3 frames are simply copied to output files — no encoder involved.
+        // Split
         setStatus({ step: 'transcribing', detail: 'status.splitting', progress: 0 })
-        const chunkPattern = `${prefix}chunk_%03d.mp3`
-        const segListFile = `${prefix}segments.csv`
-        trackedFiles.push(segListFile)
-        await ffmpeg.exec([
-          '-i', compressedName,
-          '-f', 'segment',
-          '-segment_time', String(effectiveSegmentSeconds),
-          '-segment_list', segListFile,
-          '-segment_list_type', 'csv',
-          '-c', 'copy',
-          '-y', chunkPattern,
-        ])
-
+        const chunks = await splitIntoChunks(ffmpeg, compressedName, prefix, effectiveSegmentSeconds)
         if (isCancelled()) throw new Error('error.cancelled')
-
-        // Parse segment list for timing info (each line: filename,start,end)
-        const segListRaw = await ffmpeg.readFile(segListFile) as Uint8Array
-        const segListText = new TextDecoder().decode(segListRaw)
-        const segLines = segListText.trim().split('\n').filter(Boolean)
-        try { await ffmpeg.deleteFile(segListFile) } catch { /* ignore */ }
-
-        // Read chunks into JS memory using segment list for timing
-        type ChunkInfo = { file: File; duration: number; startTime: number; endTime: number }
-        const chunks: ChunkInfo[] = []
-        for (let i = 0; i < segLines.length; i++) {
-          const parts = segLines[i].split(',')
-          const name = parts[0] || `${prefix}chunk_${String(i).padStart(3, '0')}.mp3`
-          const segStart = parseFloat(parts[1]) || 0
-          const segEnd = parseFloat(parts[2]) || 0
-          const dur = segEnd - segStart
-
-          // Skip negligible final chunks (< 1 second)
-          if (dur < 1 && chunks.length > 0) {
-            try { await ffmpeg.deleteFile(name) } catch { /* ignore */ }
-            continue
-          }
-
-          let raw: Uint8Array
-          try {
-            raw = await ffmpeg.readFile(name) as Uint8Array
-          } catch { break }
-          if (raw.length === 0) {
-            try { await ffmpeg.deleteFile(name) } catch { /* ignore */ }
-            break
-          }
-
-          const chunkFile = new File(
-            [new Blob([new Uint8Array(raw)], { type: 'audio/mpeg' })],
-            name,
-            { type: 'audio/mpeg' },
-          )
-          chunks.push({ file: chunkFile, duration: dur, startTime: segStart, endTime: segEnd })
-          if (!isCancelled()) chunkBlobsRef.current[chunks.length - 1] = chunkFile
-          trackedFiles.push(name)
-          try { await ffmpeg.deleteFile(name) } catch { /* ignore */ }
-        }
-
         if (chunks.length === 0) throw new Error('error.splitFailed')
 
+        // Store blobs for retry
+        chunks.forEach((c, i) => { chunkBlobsRef.current[i] = c.file })
+
         // Transcribe chunks sequentially
-        const results: string[] = []
-        const chunkDurations: number[] = []
-        let prevText = options.prompt || ''
-
-        for (let i = 0; i < chunks.length; i++) {
-          if (isCancelled()) throw new Error('error.cancelled')
-
-          const { file: chunkFile, duration: dur, startTime: chunkStart, endTime: chunkEnd } = chunks[i]
-
-          setStatus({
-            step: 'transcribing',
-            detail: 'status.chunkProgress',
-            detailParams: { current: i + 1, total: chunks.length },
-            progress: Math.round(((i + 1) / chunks.length) * 100),
-          })
-
-          let result: string | null = null
-          let chunkFailed = false
-          try {
-            for (let retry = 0; retry <= MAX_RETRIES; retry++) {
-              try {
-                result = await transcribeChunk(chunkFile, chunkFile.name, {
-                  ...options,
-                  prompt: prevText,
-                }, abortController.signal)
-                break
-              } catch (err) {
-                if (isCancelled()) throw new Error('error.cancelled')
-                if (retry === MAX_RETRIES) { chunkFailed = true; break }
-                await new Promise((r) => setTimeout(r, 1000 * (retry + 1)))
-              }
-            }
-          } catch (err) {
-            if (isCancelled()) throw new Error('error.cancelled')
-            chunkFailed = true
-          }
-
-          chunkDurations.push(dur)
-
-          if (chunkFailed) {
-            results.push('')
-            updateChunkResults((prev) => [
-              ...prev,
-              { index: i, text: '', duration: dur, startTime: chunkStart, endTime: chunkEnd, status: 'error' as const, error: 'error.chunkFailed' },
-            ])
-          } else {
-            results.push(result!)
-            prevText = extractLastChars(result!, options.responseFormat, 200)
-            updateChunkResults((prev) => [
-              ...prev,
-              { index: i, text: result!, duration: dur, startTime: chunkStart, endTime: chunkEnd, status: 'done' as const },
-            ])
-          }
-        }
-
-        if (results.every((r) => r === '')) throw new Error('error.splitFailed')
-
-        const chunkStartTimes = chunks.map((c) => c.startTime)
-        const merged = mergeResults(results, chunkDurations, options.responseFormat, chunkStartTimes)
+        const merged = await transcribeAllChunks(
+          chunks, options, abortController.signal, isCancelled,
+          setStatus, updateChunkResults,
+        )
 
         if (isCancelled()) throw new Error('error.cancelled')
-
-        await cleanup(ffmpeg, trackedFiles)
-        if (isCancelled()) throw new Error('error.cancelled')
+        await cleanupFiles(ffmpeg, trackedFiles)
         setStatus({ step: 'done', detail: '', progress: 100 })
         return merged
       } catch (err) {
-        // Cleanup on failure
         const ffmpeg = ffmpegRef.current
-        if (ffmpeg && trackedFiles.length > 0) {
-          await cleanup(ffmpeg, trackedFiles)
-        }
-        // Normalize AbortError to cancel message
+        if (ffmpeg && trackedFiles.length > 0) await cleanupFiles(ffmpeg, trackedFiles)
         if (isCancelled()) throw new Error('error.cancelled')
         const errMsg = err instanceof Error ? err.message : 'error.generic'
         setStatus({ step: 'error', detail: errMsg, progress: 0 })
         throw err
       }
     },
-    [loadFFmpeg, getFileDuration, clearChunks, updateChunkResults],
+    [loadFFmpeg, clearChunks, updateChunkResults],
   )
 
   const cancel = useCallback(() => {
@@ -461,17 +275,73 @@ export function useAudioProcessor() {
   return { processAndTranscribe, status, cancel, chunkResults, retryChunk }
 }
 
-function getExtension(filename: string): string {
-  const ext = filename.split('.').pop()?.toLowerCase()
-  return ext ? `.${ext}` : '.bin'
-}
+async function transcribeAllChunks(
+  chunks: ChunkInfo[],
+  options: TranscribeOptions,
+  signal: AbortSignal,
+  isCancelled: () => boolean,
+  setStatus: (s: ProcessingStatus | ((prev: ProcessingStatus) => ProcessingStatus)) => void,
+  updateChunkResults: (updater: (prev: ChunkResult[]) => ChunkResult[]) => void,
+): Promise<string> {
+  const results: string[] = []
+  const chunkDurations: number[] = []
+  let prevText = options.prompt || ''
 
-async function cleanup(ffmpeg: FFmpeg, files: string[]) {
-  for (const f of files) {
-    try {
-      await ffmpeg.deleteFile(f)
-    } catch {
-      // ignore
+  for (let i = 0; i < chunks.length; i++) {
+    if (isCancelled()) throw new Error('error.cancelled')
+
+    const { file: chunkFile, duration: dur, startTime, endTime } = chunks[i]
+
+    setStatus({
+      step: 'transcribing',
+      detail: 'status.chunkProgress',
+      detailParams: { current: i + 1, total: chunks.length },
+      progress: Math.round(((i + 1) / chunks.length) * 100),
+    })
+
+    const result = await transcribeWithRetry(chunkFile, prevText, options, signal, isCancelled)
+    chunkDurations.push(dur)
+
+    if (result === null) {
+      results.push('')
+      updateChunkResults((prev) => [
+        ...prev,
+        { index: i, text: '', duration: dur, startTime, endTime, status: 'error' as const, error: 'error.chunkFailed' },
+      ])
+    } else {
+      results.push(result)
+      prevText = extractLastChars(result, options.responseFormat, 200)
+      updateChunkResults((prev) => [
+        ...prev,
+        { index: i, text: result, duration: dur, startTime, endTime, status: 'done' as const },
+      ])
     }
   }
+
+  if (results.every((r) => r === '')) throw new Error('error.splitFailed')
+
+  const chunkStartTimes = chunks.map((c) => c.startTime)
+  return mergeResults(results, chunkDurations, options.responseFormat, chunkStartTimes)
+}
+
+async function transcribeWithRetry(
+  chunkFile: File,
+  prompt: string,
+  options: TranscribeOptions,
+  signal: AbortSignal,
+  isCancelled: () => boolean,
+): Promise<string | null> {
+  for (let retry = 0; retry <= MAX_RETRIES; retry++) {
+    try {
+      return await transcribeChunk(chunkFile, chunkFile.name, {
+        ...options,
+        prompt,
+      }, signal)
+    } catch (err) {
+      if (isCancelled()) throw new Error('error.cancelled')
+      if (retry === MAX_RETRIES) return null
+      await new Promise((r) => setTimeout(r, 1000 * (retry + 1)))
+    }
+  }
+  return null
 }
