@@ -1,69 +1,16 @@
 'use client'
 
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useAudioProcessor } from './hooks/useAudioProcessor'
 import { useTranslation } from './i18n/context'
 import { LOCALES, LOCALE_LABELS } from './i18n/types'
 import type { Locale } from './i18n/types'
-
-const MODELS = [
-  { value: 'gpt-4o-transcribe', label: 'GPT-4o Transcribe' },
-  { value: 'gpt-4o-mini-transcribe', label: 'GPT-4o Mini Transcribe' },
-  { value: 'whisper-1', label: 'Whisper-1' },
-]
-
-const FORMATS = [
-  { value: 'text', label: 'text' },
-  { value: 'json', label: 'json' },
-  { value: 'verbose_json', label: 'verbose_json' },
-  { value: 'srt', label: 'srt', whisperOnly: true },
-  { value: 'vtt', label: 'vtt', whisperOnly: true },
-]
-
-const LANGUAGES: { value: string; label?: string; labelKey?: string }[] = [
-  { value: '', labelKey: 'lang.auto' },
-  { value: 'ja', label: '日本語' },
-  { value: 'en', label: 'English' },
-  { value: 'zh', label: '中文' },
-  { value: 'ko', label: '한국어' },
-  { value: 'fr', label: 'Français' },
-  { value: 'de', label: 'Deutsch' },
-  { value: 'es', label: 'Español' },
-  { value: 'pt', label: 'Português' },
-  { value: 'it', label: 'Italiano' },
-  { value: 'ru', label: 'Русский' },
-]
-
-const MAX_FILE_SIZE = 500 * 1024 * 1024 // 500MB
-const ACCEPTED_TYPES = ['audio/mpeg', 'audio/mp4', 'audio/wav', 'audio/webm', 'audio/x-m4a', 'audio/mp3', 'audio/ogg', 'video/mp4', 'video/webm', 'audio/x-wav', 'audio/aac', 'audio/flac']
-const ACCEPTED_EXTENSIONS = ['.mp3', '.mp4', '.mpeg', '.mpga', '.m4a', '.wav', '.webm', '.ogg', '.flac']
+import { UploadZone } from './components/UploadZone'
+import { ConfigForm, FORMATS } from './components/ConfigForm'
+import { ProcessingIndicator } from './components/ProcessingIndicator'
+import { ResultPanel } from './components/ResultPanel'
 
 const TERMS_LINK_URL = 'https://openai.com/policies/terms-of-use'
-
-function formatTime(seconds: number) {
-  const h = Math.floor(seconds / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  const s = Math.floor(seconds % 60)
-  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`
-}
-
-function formatFileSize(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
-
-function validateFile(file: File): { key: string; params?: Record<string, string | number> } | null {
-  if (file.size > MAX_FILE_SIZE) {
-    return { key: 'error.fileTooLarge', params: { size: formatFileSize(file.size) } }
-  }
-  const ext = '.' + file.name.split('.').pop()?.toLowerCase()
-  const typeOk = ACCEPTED_TYPES.includes(file.type) || ACCEPTED_EXTENSIONS.includes(ext)
-  if (!typeOk) {
-    return { key: 'error.unsupportedFormat' }
-  }
-  return null
-}
 
 function renderTermsWithLink(text: string) {
   const parts = text.split('__LINK__')
@@ -86,22 +33,18 @@ export default function Home() {
   const [file, setFile] = useState<File | null>(null)
   const [model, setModel] = useState('gpt-4o-transcribe')
   const [responseFormat, setResponseFormat] = useState('text')
-  const isWhisper = model === 'whisper-1'
   const [language, setLanguage] = useState('')
   const [prompt, setPrompt] = useState('')
   const [result, setResult] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [isDragOver, setIsDragOver] = useState(false)
   const [copied, setCopied] = useState(false)
-  const [showApiKey, setShowApiKey] = useState(false)
-  const [showChunks, setShowChunks] = useState(false)
   const [retryingIndex, setRetryingIndex] = useState<number | null>(null)
 
   const promptRestoredRef = useRef(false)
-  const fileInputRef = useRef<HTMLInputElement>(null)
   const { processAndTranscribe, status, cancel, chunkResults, retryChunk } = useAudioProcessor()
 
+  // Persistence
   useEffect(() => {
     const saved = localStorage.getItem('mojiokoshi_api_key')
     if (saved) setApiKey(saved)
@@ -129,6 +72,8 @@ export default function Home() {
     }
   }, [prompt])
 
+  // Reset whisper-only format when switching model
+  const isWhisper = model === 'whisper-1'
   useEffect(() => {
     const fmt = FORMATS.find((f) => f.value === responseFormat)
     if (fmt && 'whisperOnly' in fmt && fmt.whisperOnly && !isWhisper) {
@@ -136,54 +81,14 @@ export default function Home() {
     }
   }, [model, responseFormat, isWhisper])
 
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    setIsDragOver(true)
-  }, [])
-
-  const handleDragLeave = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    setIsDragOver(false)
-  }, [])
-
-  const setFileWithValidation = useCallback((f: File) => {
-    const err = validateFile(f)
-    if (err) {
-      setFile(null)
-      setError(t(err.key, err.params))
-      return
-    }
-    setFile(f)
-    setError(null)
-  }, [t])
-
-  const handleDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    setIsDragOver(false)
-    const droppedFile = e.dataTransfer.files[0]
-    if (droppedFile) setFileWithValidation(droppedFile)
-  }, [setFileWithValidation])
-
-  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const selectedFile = e.target.files?.[0]
-    if (selectedFile) setFileWithValidation(selectedFile)
-  }, [setFileWithValidation])
-
   const handleSubmit = async () => {
-    if (!apiKey) {
-      setError(t('error.noApiKey'))
-      return
-    }
-    if (!file) {
-      setError(t('error.noFile'))
-      return
-    }
+    if (!apiKey) { setError(t('error.noApiKey')); return }
+    if (!file) { setError(t('error.noFile')); return }
 
     setIsLoading(true)
     setError(null)
     setResult('')
 
-    // Guard: force text if whisperOnly format on non-whisper model
     const fmt = FORMATS.find((f) => f.value === responseFormat)
     const safeFormat = (fmt && 'whisperOnly' in fmt && fmt.whisperOnly && model !== 'whisper-1')
       ? 'text'
@@ -191,18 +96,12 @@ export default function Home() {
 
     try {
       const text = await processAndTranscribe(file, {
-        apiKey,
-        model,
-        responseFormat: safeFormat,
-        language,
-        prompt,
+        apiKey, model, responseFormat: safeFormat, language, prompt,
       })
       setResult(text)
     } catch (err) {
       const rawMsg = err instanceof Error ? err.message : 'error.generic'
-      if (rawMsg !== 'error.cancelled') {
-        setError(t(rawMsg))
-      }
+      if (rawMsg !== 'error.cancelled') setError(t(rawMsg))
     } finally {
       setIsLoading(false)
     }
@@ -215,7 +114,6 @@ export default function Home() {
 
   const handleRetryChunk = async (index: number) => {
     if (retryingIndex !== null) return
-
     setError(null)
     setRetryingIndex(index)
     try {
@@ -223,9 +121,7 @@ export default function Home() {
       setResult(merged)
     } catch (err) {
       const rawMsg = err instanceof Error ? err.message : 'error.generic'
-      if (rawMsg !== 'error.cancelled') {
-        setError(t(rawMsg))
-      }
+      if (rawMsg !== 'error.cancelled') setError(t(rawMsg))
     } finally {
       setRetryingIndex(null)
     }
@@ -248,7 +144,6 @@ export default function Home() {
       <div className="noise-overlay" />
 
       <main className="min-h-screen flex flex-col items-center px-4 py-12 md:py-20">
-        {/* Header */}
         <header className="text-center mb-12 md:mb-16">
           <h1 className="font-display text-4xl md:text-6xl tracking-tight mb-3 text-text-primary">
             {t('header.title')}
@@ -258,155 +153,22 @@ export default function Home() {
           </p>
         </header>
 
-        {/* Main */}
         <div className="w-full max-w-2xl">
-          {/* Upload Zone */}
-          <div
-            role="button"
-            tabIndex={0}
-            className={`upload-zone rounded-xl p-8 md:p-12 text-center cursor-pointer mb-8 ${isDragOver ? 'drag-over' : ''}`}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-            onClick={() => fileInputRef.current?.click()}
-            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInputRef.current?.click() } }}
-            aria-label={t('upload.ariaLabel')}
-          >
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="audio/*,.mp3,.mp4,.mpeg,.mpga,.m4a,.wav,.webm,.ogg,.flac"
-              onChange={handleFileSelect}
-              className="hidden"
-            />
+          <UploadZone
+            file={file}
+            onFileChange={setFile}
+            onError={(msg) => setError(msg || null)}
+            t={t}
+          />
 
-            {file ? (
-              <div className="result-appear">
-                <div className="w-10 h-10 rounded-full bg-accent/10 flex items-center justify-center mx-auto mb-4">
-                  <svg className="w-5 h-5 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
-                  </svg>
-                </div>
-                <p className="text-text-primary font-medium text-sm mb-1">{file.name}</p>
-                <p className="text-text-tertiary text-xs">{formatFileSize(file.size)}</p>
-              </div>
-            ) : (
-              <>
-                <div className="w-10 h-10 rounded-full border border-border flex items-center justify-center mx-auto mb-4">
-                  <svg className="w-5 h-5 text-text-tertiary" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                  </svg>
-                </div>
-                <p className="text-text-secondary text-sm mb-1">
-                  {t('upload.dragDrop')}
-                </p>
-                <p className="text-text-tertiary text-xs">
-                  {t('upload.formats')}
-                </p>
-              </>
-            )}
-          </div>
-
-          {/* Configuration */}
-          <div className="space-y-5 mb-8">
-            {/* API Key */}
-            <div>
-              <label className="block text-xs text-text-secondary mb-2 tracking-wide">
-                {t('label.apiKey')}
-              </label>
-              <div className="relative">
-                <input
-                  type={showApiKey ? 'text' : 'password'}
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder="sk-..."
-                  className="w-full bg-surface-card border border-border rounded-lg px-4 py-3 text-sm text-text-primary placeholder:text-text-tertiary font-mono pr-20"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowApiKey(!showApiKey)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-text-tertiary hover:text-text-secondary text-xs font-mono transition-colors"
-                >
-                  {showApiKey ? t('apiKey.hide') : t('apiKey.show')}
-                </button>
-              </div>
-            </div>
-
-            {/* Model & Language */}
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs text-text-secondary mb-2 tracking-wide">
-                  {t('label.model')}
-                </label>
-                <select
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  className="w-full bg-surface-card border border-border rounded-lg px-4 py-3 text-sm text-text-primary cursor-pointer"
-                >
-                  {MODELS.map((m) => (
-                    <option key={m.value} value={m.value}>{m.label}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs text-text-secondary mb-2 tracking-wide">
-                  {t('label.language')}
-                </label>
-                <select
-                  value={language}
-                  onChange={(e) => setLanguage(e.target.value)}
-                  className="w-full bg-surface-card border border-border rounded-lg px-4 py-3 text-sm text-text-primary cursor-pointer"
-                >
-                  {LANGUAGES.map((l) => (
-                    <option key={l.value} value={l.value}>{l.labelKey ? t(l.labelKey) : l.label}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            {/* Response Format */}
-            <div>
-              <label className="block text-xs text-text-secondary mb-2 tracking-wide">
-                {t('label.format')}
-              </label>
-              <div className="flex flex-wrap gap-2">
-                {FORMATS.map((f) => {
-                  const disabled = 'whisperOnly' in f && f.whisperOnly && !isWhisper
-                  return (
-                  <div key={f.value} className={`format-option ${disabled ? 'opacity-30 pointer-events-none' : ''}`}>
-                    <input
-                      type="radio"
-                      name="format"
-                      id={`format-${f.value}`}
-                      value={f.value}
-                      checked={responseFormat === f.value}
-                      disabled={disabled}
-                      onChange={(e) => setResponseFormat(e.target.value)}
-                    />
-                    <label htmlFor={`format-${f.value}`}>
-                      {f.label}
-                    </label>
-                  </div>
-                  )
-                })}
-              </div>
-            </div>
-
-            {/* Prompt */}
-            <div>
-              <label className="block text-xs text-text-secondary mb-2 tracking-wide">
-                {t('label.prompt')}
-                <span className="text-text-tertiary ml-2">{t('label.optional')}</span>
-              </label>
-              <textarea
-                value={prompt}
-                onChange={(e) => setPrompt(e.target.value)}
-                placeholder={t('prompt.placeholder')}
-                rows={2}
-                className="w-full bg-surface-card border border-border rounded-lg px-4 py-3 text-sm text-text-primary placeholder:text-text-tertiary resize-y min-h-[60px]"
-              />
-            </div>
-          </div>
+          <ConfigForm
+            apiKey={apiKey} onApiKeyChange={setApiKey}
+            model={model} onModelChange={setModel}
+            language={language} onLanguageChange={setLanguage}
+            responseFormat={responseFormat} onFormatChange={setResponseFormat}
+            prompt={prompt} onPromptChange={setPrompt}
+            t={t}
+          />
 
           {/* Submit */}
           <button
@@ -427,149 +189,29 @@ export default function Home() {
             )}
           </button>
 
-          {/* Processing Status */}
-          {isProcessing && (
-            <div className="mt-4 result-appear">
-              <div className="flex items-center gap-3 mb-2">
-                <span className="flex items-center gap-[3px] h-5">
-                  {[...Array(7)].map((_, i) => (
-                    <span
-                      key={i}
-                      className="waveform-bar w-[3px] bg-accent/60 rounded-full"
-                    />
-                  ))}
-                </span>
-                <span className="text-sm text-text-secondary">
-                  {t(status.detail, status.detailParams)}
-                </span>
-              </div>
-              {status.progress > 0 && (
-                <div className="w-full h-1 bg-surface-card rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-accent rounded-full transition-all duration-300"
-                    style={{ width: `${status.progress}%` }}
-                  />
-                </div>
-              )}
-            </div>
-          )}
+          {isProcessing && <ProcessingIndicator status={status} t={t} />}
 
-          {/* Error */}
           {error && (
             <div className="mt-4 px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm result-appear">
               {error}
             </div>
           )}
 
-          {/* Result */}
           {result && (
-            <div className="mt-8 result-appear">
-              <div className="divider-accent mb-6" />
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2">
-                  <div className="w-1.5 h-1.5 rounded-full bg-accent" />
-                  <span className="text-xs text-text-secondary tracking-wide">{t('result.title')}</span>
-                </div>
-                <button
-                  onClick={copyToClipboard}
-                  className="text-xs text-text-tertiary hover:text-text-secondary transition-colors flex items-center gap-1.5 font-mono"
-                >
-                  {copied ? (
-                    <>
-                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                      </svg>
-                      {t('result.copied')}
-                    </>
-                  ) : (
-                    <>
-                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                      </svg>
-                      {t('result.copy')}
-                    </>
-                  )}
-                </button>
-              </div>
-              <div className="bg-surface-card border border-border rounded-xl p-5 max-h-[28rem] overflow-y-auto">
-                <pre className="font-mono text-sm text-text-primary whitespace-pre-wrap leading-relaxed break-words">
-                  {result}
-                </pre>
-              </div>
-
-              {/* Chunk Details */}
-              {chunkResults.length >= 1 && (
-                <div className="mt-4">
-                  <button
-                    onClick={() => setShowChunks(!showChunks)}
-                    className="flex items-center gap-2 text-xs text-text-tertiary hover:text-text-secondary transition-colors"
-                  >
-                    <svg
-                      className={`w-3 h-3 transition-transform ${showChunks ? '' : '-rotate-90'}`}
-                      fill="none"
-                      viewBox="0 0 24 24"
-                      stroke="currentColor"
-                    >
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                    </svg>
-                    <span className="font-mono tracking-wide">
-                      {t('chunk.details')} ({chunkResults.length})
-                    </span>
-                  </button>
-
-                  {showChunks && (
-                    <div className="mt-3 bg-surface-card border border-border rounded-xl divide-y divide-border overflow-hidden">
-                      {chunkResults.map((chunk, arrayIndex) => (
-                        <div key={chunk.index} className="p-4">
-                          <div className="flex items-center justify-between mb-2">
-                            <span className="text-xs text-text-secondary font-mono">
-                              {t('chunk.label', { current: arrayIndex + 1, total: chunkResults.length })}
-                              <span className="ml-2 text-text-tertiary">
-                                {formatTime(chunk.startTime)}–{formatTime(chunk.endTime)}
-                              </span>
-                            </span>
-                            {chunk.status === 'retrying' || retryingIndex === chunk.index ? (
-                              <span className="flex items-center gap-1.5 text-xs text-accent font-mono">
-                                <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
-                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                                </svg>
-                                {t('chunk.retrying')}
-                              </span>
-                            ) : (
-                              <button
-                                onClick={() => handleRetryChunk(chunk.index)}
-                                disabled={retryingIndex !== null}
-                                className={`text-xs transition-colors font-mono disabled:opacity-30 disabled:cursor-not-allowed ${chunk.status === 'error' ? 'text-red-400 hover:text-red-300' : 'text-text-tertiary hover:text-accent'}`}
-                              >
-                                {t('chunk.retry')}
-                              </button>
-                            )}
-                          </div>
-                          <div className="max-h-40 overflow-y-auto">
-                            {chunk.status === 'error' ? (
-                              <p className="font-mono text-xs text-red-400/70">
-                                {t(chunk.error || 'error.chunkFailed')}
-                              </p>
-                            ) : (
-                              <pre className="font-mono text-xs text-text-primary/70 whitespace-pre-wrap leading-relaxed break-words">
-                                {chunk.text}
-                              </pre>
-                            )}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
+            <ResultPanel
+              result={result}
+              chunkResults={chunkResults}
+              retryingIndex={retryingIndex}
+              onRetryChunk={handleRetryChunk}
+              onCopy={copyToClipboard}
+              copied={copied}
+              t={t}
+            />
           )}
         </div>
 
         {/* Footer */}
         <footer className="mt-20 w-full max-w-2xl">
-          {/* Terms */}
           <div className="divider-accent mb-6" />
           <div className="mb-6">
             <p className="font-mono text-[9px] tracking-[0.3em] uppercase text-text-tertiary mb-4">
