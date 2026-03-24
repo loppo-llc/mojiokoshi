@@ -6,7 +6,8 @@ import { useTranslation } from './i18n/context'
 import { LOCALES, LOCALE_LABELS } from './i18n/types'
 import type { Locale } from './i18n/types'
 import { UploadZone } from './components/UploadZone'
-import { ConfigForm, FORMATS } from './components/ConfigForm'
+import { ConfigForm } from './components/ConfigForm'
+import { FORMATS } from './lib/constants'
 import { ProcessingIndicator } from './components/ProcessingIndicator'
 import { ResultPanel } from './components/ResultPanel'
 
@@ -42,6 +43,7 @@ export default function Home() {
   const [retryingIndex, setRetryingIndex] = useState<number | null>(null)
 
   const promptRestoredRef = useRef(false)
+  const submitIdRef = useRef(0)
   const { processAndTranscribe, status, cancel, chunkResults, retryChunk } = useAudioProcessor()
 
   // Persistence
@@ -85,6 +87,7 @@ export default function Home() {
     if (!apiKey) { setError(t('error.noApiKey')); return }
     if (!file) { setError(t('error.noFile')); return }
 
+    const currentId = ++submitIdRef.current
     setIsLoading(true)
     setError(null)
     setResult('')
@@ -98,16 +101,19 @@ export default function Home() {
       const text = await processAndTranscribe(file, {
         apiKey, model, responseFormat: safeFormat, language, prompt,
       })
+      if (submitIdRef.current !== currentId) return
       setResult(text)
     } catch (err) {
+      if (submitIdRef.current !== currentId) return
       const rawMsg = err instanceof Error ? err.message : 'error.generic'
       if (rawMsg !== 'error.cancelled') setError(t(rawMsg))
     } finally {
-      setIsLoading(false)
+      if (submitIdRef.current === currentId) setIsLoading(false)
     }
   }
 
   const handleCancel = () => {
+    submitIdRef.current++
     cancel()
     setIsLoading(false)
   }
