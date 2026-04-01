@@ -39,11 +39,9 @@ export function useAudioProcessor() {
   const jobOptionsRef = useRef<TranscribeOptions | null>(null)
 
   const updateChunkResults = useCallback((updater: (prev: ChunkResult[]) => ChunkResult[]) => {
-    setChunkResults((prev) => {
-      const next = updater(prev)
-      chunkResultsRef.current = next
-      return next
-    })
+    const next = updater(chunkResultsRef.current)
+    chunkResultsRef.current = next
+    setChunkResults(next)
   }, [])
 
   const clearChunks = useCallback(() => {
@@ -78,6 +76,8 @@ export function useAudioProcessor() {
 
       const retryJobId = jobIdRef.current
       const abortController = new AbortController()
+      const prevAbort = abortRef.current
+      abortRef.current = abortController
 
       const origChunk = chunkResultsRef.current.find((c) => c.index === index)
       const origStatus = origChunk?.status || 'error'
@@ -122,21 +122,22 @@ export function useAudioProcessor() {
 
         if (jobIdRef.current !== retryJobId) throw new Error('error.cancelled')
 
-        let merged = ''
-        updateChunkResults((prev) => {
-          const next = prev.map((c) =>
+        updateChunkResults((prev) =>
+          prev.map((c) =>
             c.index === index ? { ...c, text: result, status: 'done' as const, error: undefined } : c,
-          )
-          const texts = next.map((c) => c.text)
-          const durations = next.map((c) => c.duration)
-          const starts = next.map((c) => c.startTime)
-          try {
-            merged = mergeResults(texts, durations, opts.responseFormat, starts)
-          } catch {
-            merged = texts.join('\n')
-          }
-          return next
-        })
+          ),
+        )
+
+        const updated = chunkResultsRef.current
+        const texts = updated.map((c) => c.text)
+        const durations = updated.map((c) => c.duration)
+        const starts = updated.map((c) => c.startTime)
+        let merged: string
+        try {
+          merged = mergeResults(texts, durations, opts.responseFormat, starts)
+        } catch {
+          merged = texts.join('\n')
+        }
         return merged
       } catch (err) {
         if (jobIdRef.current === retryJobId) {
@@ -145,6 +146,10 @@ export function useAudioProcessor() {
           )
         }
         throw err
+      } finally {
+        if (abortRef.current === abortController) {
+          abortRef.current = prevAbort
+        }
       }
     },
     [updateChunkResults, loadFFmpeg],
